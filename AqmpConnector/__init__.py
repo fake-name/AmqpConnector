@@ -17,10 +17,25 @@ class Connector:
 					consumer_queue = 'task.q',
 					response_queue = 'response.q',
 					exchange       = 'tasks.e',
-					master         = False
+					master         = False,
+					synchronous    = True,
+					flush_queues   = False
 				):
 
-		self.log = logging.getLogger("Connector")
+		# The synchronous flag controls whether the connector should limit itself
+		# to consuming one message at-a-time.
+		# This is used for clients, which should only retreive one message, process it,
+		# send a response, and only then retreive another.
+		self.synchronous = synchronous
+
+		# Number of tasks that have been retreived by this client.
+		# Used for limiting the number of tasks each client will pre-download and
+		# place in it's internal queues.
+		self.active      = 0
+
+		self.log = logging.getLogger("Main.Connector")
+
+		self.log.debug("Setting up AqmpConnector!")
 
 		# The master has the response and message queues swapped,
 		# Because it puts messages into the consumer queue, and
@@ -58,6 +73,17 @@ class Connector:
 		self.channel.queue_declare(self.response_q, auto_delete=False)
 		self.channel.queue_bind(self.response_q, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
 
+		# "NAK" queue, used for keeping the event loop ticking when we
+		# purposefully do not want to receive messages
+		self.channel.queue_declare('nak.q', auto_delete=False)
+		self.channel.queue_bind('nak.q', exchange=self.exchange, routing_key="nak")
+
+
+		if flush_queues:
+			self.channel.queue_purge(self.consumer_q)
+			self.channel.queue_purge(self.response_q)
+
+
 		# set up the task and response queues.
 		self.taskQueue = queue.Queue()
 		self.responseQueue = queue.Queue()
@@ -94,23 +120,38 @@ class Connector:
 			if self.connection.last_heartbeat_received != lastHeartbeat:
 				lastHeartbeat = self.connection.last_heartbeat_received
 				self.log.debug("Heartbeat tick received: %s", lastHeartbeat)
+
 			self.connection.heartbeat_tick()
-			# self.connection.send_heartbeat()
 			time.sleep(0.25)
-			item = self.channel.basic_get(queue=self.consumer_q)
-			if item:
-				item.channel.basic_ack(item.delivery_info['delivery_tag'])
-				self.taskQueue.put(item.body)
 
-			try:
-				put = self.responseQueue.get_nowait()
-				self.log.info("Publishing message '%s'", put)
+			if self.active == 0 or not self.synchronous:
+				self.log.debug("Looping, waiting for job.")
+				item = self.channel.basic_get(queue=self.consumer_q)
+				if item:
+					self.log.debug("Received packet! Processing.")
+					item.channel.basic_ack(item.delivery_info['delivery_tag'])
+					self.taskQueue.put(item.body)
+					self.active += 1
+			else:
+				self.log.debug("Looping, have active task.")
+				# Because the library is annoying, there is no transport activity
+				# unless we *specifically* poll a queue (things like `heartbeat_tick()`
+				# apparently don't actually check the rx buffer).
+				# Since I don't want to consume garbate packets, we create a queue
+				# specifically to consume from that's always empty
+				item = self.channel.basic_get(queue='nak.q')
 
-				message = amqp.basic_message.Message(body=put)
 
-				self.channel.basic_publish(message, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
-			except queue.Empty:
-				pass
+			while not self.responseQueue.empty():
+				try:
+					put = self.responseQueue.get_nowait()
+					self.log.info("Publishing message '%s'", put)
+					message = amqp.basic_message.Message(body=put)
+					self.channel.basic_publish(message, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
+					self.active -= 1
+
+				except queue.Empty:
+					pass
 
 		self.log.info("Thread Exiting")
 		self.connection.close()
@@ -134,6 +175,7 @@ class Connector:
 		'''
 		self.responseQueue.put(message)
 
+
 def test():
 	import json
 	import sys
@@ -153,14 +195,20 @@ def test():
 					password     = settings["RABBIT_PASWD"],
 					host         = settings["RABBIT_SRVER"],
 					virtual_host = settings["RABBIT_VHOST"],
-					master       = isMaster)
+					master       = isMaster,
+					synchronous  = not isMaster,
+					flush_queues = isMaster)
 
 	while 1:
 		try:
+			# if not isMaster:
 			time.sleep(1)
+
 			new = con.getMessage()
 			if new:
 				print(new)
+				if not isMaster:
+					con.putMessage("Hi Thar!")
 
 			if isMaster:
 				con.putMessage("Oh HAI")
