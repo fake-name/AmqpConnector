@@ -35,7 +35,7 @@ class Connector:
 
 		self.log = logging.getLogger("Main.Connector")
 
-		self.log.debug("Setting up AqmpConnector!")
+		self.log.info("Setting up AqmpConnector!")
 
 		# The master has the response and message queues swapped,
 		# Because it puts messages into the consumer queue, and
@@ -58,7 +58,7 @@ class Connector:
 		self.exchange   = exchange
 
 		# Connect to server
-		self.connection = amqp.connection.Connection(host=host, userid=userid, password=password, virtual_host=virtual_host, heartbeat=30)
+		self.connection = amqp.connection.Connection(host=host, userid=userid, password=password, virtual_host=virtual_host, heartbeat=90)
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
@@ -93,16 +93,17 @@ class Connector:
 		self.run = True
 
 		# self.poll()
-		self.thread = threading.Thread(target=self._poll, daemon=True)
+		self.log.info("Starting AMQP interface thread.")
+		self.thread = threading.Thread(target=self._poll_proxy, daemon=True)
 		self.thread.start()
 
-	def stop(self):
-		'''
-		Tell the AMQP interface thread to halt, and then join() on it.
-		Will block until the queue has been cleanly shut down.
-		'''
-		self.run = False
-		self.thread.join()
+	def _poll_proxy(self):
+		self.log.info("AMQP interface thread started.")
+		try:
+			self._poll()
+		except KeyboardInterrupt:
+			self.log.warning("AQMP Connector thread interrupted by keyboard interrupt!")
+			self._poll()
 
 	def _poll(self):
 		'''
@@ -111,7 +112,7 @@ class Connector:
 		Received messages are ack-ed, and then placed into the appropriate local queue.
 		messages in the outgoing queue are transmitted.
 
-		NOTE: Maximum throughput is 4 messages-second, limited by the internal poll-rate.
+		NOTE: Maximum throughput is 2 messages-second, limited by the internal poll-rate.
 		'''
 		lastHeartbeat = self.connection.last_heartbeat_received
 
@@ -122,8 +123,7 @@ class Connector:
 				self.log.debug("Heartbeat tick received: %s", lastHeartbeat)
 
 			self.connection.heartbeat_tick()
-			time.sleep(0.25)
-
+			time.sleep(0.50)
 			if self.active == 0 or not self.synchronous:
 				self.log.debug("Looping, waiting for job.")
 				item = self.channel.basic_get(queue=self.consumer_q)
@@ -142,7 +142,7 @@ class Connector:
 				item = self.channel.basic_get(queue='nak.q')
 
 
-			while not self.responseQueue.empty():
+			while 1:
 				try:
 					put = self.responseQueue.get_nowait()
 					self.log.info("Publishing message '%s'", put)
@@ -151,11 +151,11 @@ class Connector:
 					self.active -= 1
 
 				except queue.Empty:
-					pass
+					break
 
-		self.log.info("Thread Exiting")
+		self.log.info("AMQP Thread Exiting")
 		self.connection.close()
-		self.log.info("Thread exited")
+		self.log.info("AMQP Thread exited")
 
 	def getMessage(self):
 		'''
@@ -174,6 +174,18 @@ class Connector:
 		Place a message into the outgoing queue.
 		'''
 		self.responseQueue.put(message)
+
+
+
+	def stop(self):
+		'''
+		Tell the AMQP interface thread to halt, and then join() on it.
+		Will block until the queue has been cleanly shut down.
+		'''
+		self.log.info("Stopping AMQP interface thread.")
+		self.run = False
+		self.thread.join()
+		self.log.info("AMQP interface thread halted.")
 
 
 def test():
