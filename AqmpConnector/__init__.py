@@ -154,14 +154,19 @@ class Connector:
 			while 1:
 				try:
 					put = self.responseQueue.get_nowait()
-					self.log.info("Publishing message '%s'", put)
+					self.log.info("Publishing message of len '%s'K", len(put)/3)
 					message = amqp.basic_message.Message(body=put)
 					self.channel.basic_publish(message, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
 					self.active -= 1
 
 				except queue.Empty:
 					break
+
+			# Reset the print integrator.
+			if integrator > 5:
+				integrator = 0
 			integrator += loop_delay
+
 
 		self.log.info("AMQP Thread Exiting")
 		self.connection.close()
@@ -202,7 +207,7 @@ def test():
 	import json
 	import sys
 	import os.path
-	logging.basicConfig(level=logging.DEBUG)
+	logging.basicConfig(level=logging.INFO)
 
 	sPaths = ['./settings.json', '../settings.json']
 
