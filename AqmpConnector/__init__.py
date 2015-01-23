@@ -112,28 +112,37 @@ class Connector:
 		Received messages are ack-ed, and then placed into the appropriate local queue.
 		messages in the outgoing queue are transmitted.
 
-		NOTE: Maximum throughput is 2 messages-second, limited by the internal poll-rate.
+		NOTE: Maximum throughput is 4 messages-second, limited by the internal poll-rate.
 		'''
 		lastHeartbeat = self.connection.last_heartbeat_received
+
+		print_time = 5     # Print a status message every n seconds
+		integrator = 0     # Time since last status message emitted.
+		loop_delay = 0.25  # Poll interval for queues.
 
 		while self.run:
 			# Kick over heartbeat
 			if self.connection.last_heartbeat_received != lastHeartbeat:
 				lastHeartbeat = self.connection.last_heartbeat_received
-				self.log.debug("Heartbeat tick received: %s", lastHeartbeat)
+				if integrator > print_time:
+					self.log.info("Heartbeat tick received: %s", lastHeartbeat)
 
 			self.connection.heartbeat_tick()
-			time.sleep(0.50)
+			time.sleep(loop_delay)
 			if self.active == 0 or not self.synchronous:
-				self.log.debug("Looping, waiting for job.")
+
+				if integrator > print_time:
+					self.log.info("Looping, waiting for job.")
 				item = self.channel.basic_get(queue=self.consumer_q)
 				if item:
-					self.log.debug("Received packet! Processing.")
+					self.log.info("Received packet! Processing.")
 					item.channel.basic_ack(item.delivery_info['delivery_tag'])
 					self.taskQueue.put(item.body)
 					self.active += 1
 			else:
-				self.log.debug("Looping, have active task.")
+
+				if integrator > print_time:
+					self.log.info("Active task running.")
 				# Because the library is annoying, there is no transport activity
 				# unless we *specifically* poll a queue (things like `heartbeat_tick()`
 				# apparently don't actually check the rx buffer).
@@ -152,6 +161,7 @@ class Connector:
 
 				except queue.Empty:
 					break
+			integrator += loop_delay
 
 		self.log.info("AMQP Thread Exiting")
 		self.connection.close()
