@@ -1,5 +1,6 @@
 
 import amqp
+import traceback
 import logging
 import threading
 import queue
@@ -19,7 +20,8 @@ class Connector:
 					exchange       = 'tasks.e',
 					master         = False,
 					synchronous    = True,
-					flush_queues   = False
+					flush_queues   = False,
+					heartbeat      = 60*5
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
@@ -57,27 +59,21 @@ class Connector:
 		self.response_q = response_queue
 		self.exchange   = exchange
 
-		# Connect to server
-		self.connection = amqp.connection.Connection(host=host, userid=userid, password=password, virtual_host=virtual_host, heartbeat=90)
+		# Declare here to shut up pylint.
+		self.connection = None
+		self.channel = None
 
-		# Channel and exchange setup
-		self.channel = self.connection.channel()
-		self.channel.basic_qos(prefetch_size=0, prefetch_count=1, a_global=True)
+		# Shove connection parameters into class member variables, so they'll
+		# hang around when needed for reconnecting.
+		self.host         = host
+		self.userid       = userid
+		self.password     = password
+		self.virtual_host = virtual_host
+		self.heartbeat    = heartbeat
 
-		self.channel.exchange_declare(self.exchange, type='direct', auto_delete=False)
 
-		# set up consumer and response queues
-		self.channel.queue_declare(self.consumer_q, auto_delete=False)
-		self.channel.queue_bind(self.consumer_q, exchange=self.exchange, routing_key=self.consumer_q.split(".")[0])
-
-		self.channel.queue_declare(self.response_q, auto_delete=False)
-		self.channel.queue_bind(self.response_q, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
-
-		# "NAK" queue, used for keeping the event loop ticking when we
-		# purposefully do not want to receive messages
-		self.channel.queue_declare('nak.q', auto_delete=False)
-		self.channel.queue_bind('nak.q', exchange=self.exchange, routing_key="nak")
-
+		self._connect()
+		self._setupQueues()
 
 		if flush_queues:
 			self.channel.queue_purge(self.consumer_q)
@@ -96,6 +92,34 @@ class Connector:
 		self.log.info("Starting AMQP interface thread.")
 		self.thread = threading.Thread(target=self._poll_proxy, daemon=True)
 		self.thread.start()
+
+	def _connect(self):
+
+		# Connect to server
+		self.connection = amqp.connection.Connection(host=self.host, userid=self.userid, password=self.password, virtual_host=self.virtual_host, heartbeat=self.heartbeat)
+
+		# Channel and exchange setup
+		self.channel = self.connection.channel()
+		self.channel.basic_qos(prefetch_size=0, prefetch_count=1, a_global=True)
+
+	def _setupQueues(self):
+
+		self.channel.exchange_declare(self.exchange, type='direct', auto_delete=False)
+
+		# set up consumer and response queues
+		self.channel.queue_declare(self.consumer_q, auto_delete=False)
+		self.channel.queue_bind(self.consumer_q, exchange=self.exchange, routing_key=self.consumer_q.split(".")[0])
+
+		self.channel.queue_declare(self.response_q, auto_delete=False)
+		self.channel.queue_bind(self.response_q, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
+
+		# "NAK" queue, used for keeping the event loop ticking when we
+		# purposefully do not want to receive messages
+		self.channel.queue_declare('nak.q', auto_delete=False)
+		self.channel.queue_bind('nak.q', exchange=self.exchange, routing_key="nak")
+
+
+
 
 	def _poll_proxy(self):
 		self.log.info("AMQP interface thread started.")
@@ -121,35 +145,59 @@ class Connector:
 		loop_delay = 0.25  # Poll interval for queues.
 
 		while self.run:
-			# Kick over heartbeat
-			if self.connection.last_heartbeat_received != lastHeartbeat:
-				lastHeartbeat = self.connection.last_heartbeat_received
-				if integrator > print_time:
-					self.log.info("Heartbeat tick received: %s", lastHeartbeat)
 
-			self.connection.heartbeat_tick()
-			time.sleep(loop_delay)
-			if self.active == 0 or not self.synchronous:
+			try:
+				# Kick over heartbeat
+				if self.connection.last_heartbeat_received != lastHeartbeat:
+					lastHeartbeat = self.connection.last_heartbeat_received
+					if integrator > print_time:
+						self.log.info("Heartbeat tick received: %s", lastHeartbeat)
 
-				if integrator > print_time:
-					self.log.info("Looping, waiting for job.")
-				item = self.channel.basic_get(queue=self.consumer_q)
-				if item:
-					self.log.info("Received packet! Processing.")
-					item.channel.basic_ack(item.delivery_info['delivery_tag'])
-					self.taskQueue.put(item.body)
-					self.active += 1
-			else:
+				self.connection.heartbeat_tick()
+				self.connection.send_heartbeat()
+				time.sleep(loop_delay)
+				if self.active == 0 or not self.synchronous:
 
-				if integrator > print_time:
-					self.log.info("Active task running.")
-				# Because the library is annoying, there is no transport activity
-				# unless we *specifically* poll a queue (things like `heartbeat_tick()`
-				# apparently don't actually check the rx buffer).
-				# Since I don't want to consume garbate packets, we create a queue
-				# specifically to consume from that's always empty
-				item = self.channel.basic_get(queue='nak.q')
+					if integrator > print_time:
+						self.log.info("Looping, waiting for job.")
+					self.active += self._processReceiving()
 
+				else:
+					if integrator > print_time:
+						self.log.info("Active task running.")
+
+				self._publishOutgoing()
+
+				# Reset the print integrator.
+				if integrator > 5:
+					integrator = 0
+				integrator += loop_delay
+			except amqp.Connection.connection_errors:
+				self.log.error("Connection dropped! Attempting to reconnect!")
+				try:
+					self.connection.close()
+				except Exception:
+					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
+					for line in traceback.format_exc().split('\n'):
+						self.log.error(line)
+
+				self._connect()
+				self._setupQueues()
+
+		self.log.info("AMQP Thread Exiting")
+		self.connection.close()
+		self.log.info("AMQP Thread exited")
+
+	def _processReceiving(self):
+		item = self.channel.basic_get(queue=self.consumer_q)
+		if item:
+			self.log.info("Received packet! Processing.")
+			item.channel.basic_ack(item.delivery_info['delivery_tag'])
+			self.taskQueue.put(item.body)
+			return 1
+		return 0
+
+	def _publishOutgoing(self):
 
 			while 1:
 				try:
@@ -162,15 +210,6 @@ class Connector:
 				except queue.Empty:
 					break
 
-			# Reset the print integrator.
-			if integrator > 5:
-				integrator = 0
-			integrator += loop_delay
-
-
-		self.log.info("AMQP Thread Exiting")
-		self.connection.close()
-		self.log.info("AMQP Thread exited")
 
 	def getMessage(self):
 		'''
