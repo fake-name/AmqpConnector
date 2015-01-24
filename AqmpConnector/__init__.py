@@ -21,7 +21,8 @@ class Connector:
 					master         = False,
 					synchronous    = True,
 					flush_queues   = False,
-					heartbeat      = 60*5
+					heartbeat      = 60*5,
+					ssl            = None
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
@@ -58,6 +59,11 @@ class Connector:
 		self.consumer_q = consumer_queue
 		self.response_q = response_queue
 		self.exchange   = exchange
+
+		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
+		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
+		# can pass arbitrary kwargs.
+		self.sslopts    = ssl
 
 		# Declare here to shut up pylint.
 		self.connection = None
@@ -96,7 +102,12 @@ class Connector:
 	def _connect(self):
 
 		# Connect to server
-		self.connection = amqp.connection.Connection(host=self.host, userid=self.userid, password=self.password, virtual_host=self.virtual_host, heartbeat=self.heartbeat)
+		self.connection = amqp.connection.Connection(host=self.host,
+													userid=self.userid,
+													password=self.password,
+													virtual_host=self.virtual_host,
+													heartbeat=self.heartbeat,
+													ssl=self.sslopts)
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
