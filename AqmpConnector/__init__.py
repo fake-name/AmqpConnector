@@ -202,7 +202,7 @@ class Connector:
 			while 1:
 				try:
 					put = self.responseQueue.get_nowait()
-					self.log.info("Publishing message of len '%0.3f'K", len(put)/3)
+					self.log.info("Publishing message of len '%0.3f'K", len(put)/1024)
 					message = amqp.basic_message.Message(body=put)
 					self.channel.basic_publish(message, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
 					self.active -= 1
