@@ -7,7 +7,7 @@ setup(
 	name="AqmpConnector",
 
 	# Version number (initial):
-	version="0.0.15",
+	version="0.0.16",
 
 	# Application author details:
 	author="Connor Wolf",

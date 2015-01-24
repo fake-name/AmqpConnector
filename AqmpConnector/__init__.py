@@ -69,6 +69,16 @@ class Connector:
 		self.connection = None
 		self.channel = None
 
+		# Patch in the port number to the host name if it's not present.
+		# This is really clumsy, but you can't explicitly specify the port
+		# in the amqp library
+		if not ":" in host:
+			if ssl:
+				host += ":5671"
+			else:
+				host += ":5672"
+
+
 		# Shove connection parameters into class member variables, so they'll
 		# hang around when needed for reconnecting.
 		self.host         = host
