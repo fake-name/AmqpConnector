@@ -4,28 +4,28 @@ from distutils.core import setup
 import sys
 setup(
 	# Application name:
-	name="AqmpConnector",
+	name="AmqpConnector",
 
 	# Version number (initial):
-	version="0.0.16",
+	version="0.0.17",
 
 	# Application author details:
 	author="Connor Wolf",
 	author_email="github@imaginaryindustries.com",
 
 	# Packages
-	packages=["AqmpConnector"],
+	packages=["AmqpConnector"],
 
 	# Include additional files into the package
 	include_package_data=True,
 
 
 	# Details
-	url="http://pypi.python.org/pypi/AqmpConnector/",
+	url="http://pypi.python.org/pypi/AmqpConnector/",
 
 	#
 	# license="LICENSE.txt",
-	description="Simple library for building a distributed task system over AQMP.",
+	description="Simple library for building a distributed task system over AMQP.",
 
 	long_description=open("README.md").read(),
 
