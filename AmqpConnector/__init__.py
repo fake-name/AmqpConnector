@@ -11,18 +11,22 @@ class Connector:
 
 	def __init__(
 					self,
-					host           = None,
-					userid         = 'guest',
-					password       = 'guest',
-					virtual_host   = '/',
-					consumer_queue = 'task.q',
-					response_queue = 'response.q',
-					exchange       = 'tasks.e',
-					master         = False,
-					synchronous    = True,
-					flush_queues   = False,
-					heartbeat      = 60*5,
-					ssl            = None
+					host                   = None,
+					userid                 = 'guest',
+					password               = 'guest',
+					virtual_host           = '/',
+					task_queue             = 'task.q',
+					response_queue         = 'response.q',
+					task_exchange          = 'tasks.e',
+					task_exchange_type     = 'direct',
+					response_exchange      = 'resps.e',
+					response_exchange_type = 'direct',
+					master                 = False,
+					synchronous            = True,
+					flush_queues           = False,
+					heartbeat              = 60*5,
+					ssl                    = None,
+					poll_rate              = 0.25
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
@@ -30,6 +34,7 @@ class Connector:
 		# This is used for clients, which should only retreive one message, process it,
 		# send a response, and only then retreive another.
 		self.synchronous = synchronous
+		self.poll_rate   = poll_rate
 
 		# Number of tasks that have been retreived by this client.
 		# Used for limiting the number of tasks each client will pre-download and
@@ -40,25 +45,23 @@ class Connector:
 
 		self.log.info("Setting up AqmpConnector!")
 
-		# The master has the response and message queues swapped,
-		# Because it puts messages into the consumer queue, and
-		# receives them from the response queue, whereas the
-		# clients all do the opposite.
-		if master == True:
-			consumer_queue, response_queue = response_queue, consumer_queue
+
+		self.log.info("Comsuming from queue '{conq}', emitting responses on '{tasq}'.".format(conq = task_queue, tasq=response_queue))
+		self.master = master
 
 		# Validity-Check args
 		if not host:
 			raise ValueError("You must specify a host to connect to!")
-
-		assert consumer_queue.endswith(".q") == True
-		assert response_queue.endswith(".q") == True
-		assert       exchange.endswith(".e") == True
+		assert        task_queue.endswith(".q") == True
+		assert    response_queue.endswith(".q") == True
+		assert     task_exchange.endswith(".e") == True
+		assert response_exchange.endswith(".e") == True
 
 		# Move args into class variables
-		self.consumer_q = consumer_queue
-		self.response_q = response_queue
-		self.exchange   = exchange
+		self.task_q            = task_queue
+		self.response_q        = response_queue
+		self.task_exchange     = task_exchange
+		self.response_exchange = response_exchange
 
 		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
 		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
@@ -67,7 +70,7 @@ class Connector:
 
 		# Declare here to shut up pylint.
 		self.connection = None
-		self.channel = None
+		self.channel    = None
 
 		# Patch in the port number to the host name if it's not present.
 		# This is really clumsy, but you can't explicitly specify the port
@@ -87,12 +90,14 @@ class Connector:
 		self.virtual_host = virtual_host
 		self.heartbeat    = heartbeat
 
+		self.task_exchange_type = task_exchange_type
+		self.response_exchange_type = response_exchange_type
 
 		self._connect()
 		self._setupQueues()
 
 		if flush_queues:
-			self.channel.queue_purge(self.consumer_q)
+			self.channel.queue_purge(self.task_q)
 			self.channel.queue_purge(self.response_q)
 
 
@@ -112,32 +117,40 @@ class Connector:
 	def _connect(self):
 
 		# Connect to server
-		self.connection = amqp.connection.Connection(host=self.host,
-													userid=self.userid,
-													password=self.password,
-													virtual_host=self.virtual_host,
-													heartbeat=self.heartbeat,
-													ssl=self.sslopts)
+		self.connection = amqp.connection.Connection(host        =self.host,
+													userid       =self.userid,
+													password     =self.password,
+													virtual_host =self.virtual_host,
+													heartbeat    =self.heartbeat,
+													ssl          =self.sslopts)
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
-		self.channel.basic_qos(prefetch_size=0, prefetch_count=1, a_global=True)
+		self.channel.basic_qos(prefetch_size=0, prefetch_count=1, a_global=False)
 
 	def _setupQueues(self):
 
-		self.channel.exchange_declare(self.exchange, type='direct', auto_delete=False)
+		self.channel.exchange_declare(self.task_exchange, type=self.task_exchange_type, auto_delete=False)
+		self.channel.exchange_declare(self.response_exchange, type=self.response_exchange_type, auto_delete=False)
 
 		# set up consumer and response queues
-		self.channel.queue_declare(self.consumer_q, auto_delete=False)
-		self.channel.queue_bind(self.consumer_q, exchange=self.exchange, routing_key=self.consumer_q.split(".")[0])
+		if self.master:
+			# Master has to declare the response queue so it can listen for responses
+			self.channel.queue_declare(self.response_q, auto_delete=False)
+			self.channel.queue_bind(self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
+			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.response_q, ex=self.response_exchange))
 
-		self.channel.queue_declare(self.response_q, auto_delete=False)
-		self.channel.queue_bind(self.response_q, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
+		if not self.master:
+			# Clients need to declare their task queues, so the master can publish into them.
+			self.channel.queue_declare(self.task_q, auto_delete=False)
+			self.channel.queue_bind(self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
+			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.task_q, ex=self.task_exchange))
 
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
+		# THIS IS A SHITTY WORKAROUND for keepalive issues.
 		self.channel.queue_declare('nak.q', auto_delete=False)
-		self.channel.queue_bind('nak.q', exchange=self.exchange, routing_key="nak")
+		self.channel.queue_bind('nak.q', exchange=self.response_exchange, routing_key="nak")
 
 
 
@@ -161,9 +174,9 @@ class Connector:
 		'''
 		lastHeartbeat = self.connection.last_heartbeat_received
 
-		print_time = 5     # Print a status message every n seconds
-		integrator = 0     # Time since last status message emitted.
-		loop_delay = 0.25  # Poll interval for queues.
+		print_time = 15              # Print a status message every n seconds
+		integrator = 0               # Time since last status message emitted.
+		loop_delay = self.poll_rate  # Poll interval for queues.
 
 		while self.run:
 
@@ -210,9 +223,17 @@ class Connector:
 		self.log.info("AMQP Thread exited")
 
 	def _processReceiving(self):
-		item = self.channel.basic_get(queue=self.consumer_q)
+
+
+		if self.master:
+			in_queue = self.response_q
+		else:
+			in_queue = self.task_q
+
+
+		item = self.channel.basic_get(queue=in_queue)
 		if item:
-			self.log.info("Received packet! Processing.")
+			self.log.info("Received packet from queue '{queue}'! Processing.".format(queue=in_queue))
 			item.channel.basic_ack(item.delivery_info['delivery_tag'])
 			self.taskQueue.put(item.body)
 			return 1
@@ -220,12 +241,19 @@ class Connector:
 
 	def _publishOutgoing(self):
 
+			if self.master:
+				out_queue = self.task_exchange
+				out_key   = self.task_q.split(".")[0]
+			else:
+				out_queue = self.response_exchange
+				out_key   = self.response_q.split(".")[0]
+
 			while 1:
 				try:
 					put = self.responseQueue.get_nowait()
-					self.log.info("Publishing message of len '%0.3f'K", len(put)/1024)
+					self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
 					message = amqp.basic_message.Message(body=put)
-					self.channel.basic_publish(message, exchange=self.exchange, routing_key=self.response_q.split(".")[0])
+					self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
 					self.active -= 1
 
 				except queue.Empty:
