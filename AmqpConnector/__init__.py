@@ -26,15 +26,19 @@ class Connector:
 					flush_queues           = False,
 					heartbeat              = 60*5,
 					ssl                    = None,
-					poll_rate              = 0.25
+					poll_rate              = 0.25,
+					prefetch               = 1,
+					prefetch_size          = 0,
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
 		# to consuming one message at-a-time.
 		# This is used for clients, which should only retreive one message, process it,
 		# send a response, and only then retreive another.
-		self.synchronous = synchronous
-		self.poll_rate   = poll_rate
+		self.synchronous   = synchronous
+		self.poll_rate     = poll_rate
+		self.prefetch      = prefetch
+		self.prefetch_size = prefetch_size
 
 		# Number of tasks that have been retreived by this client.
 		# Used for limiting the number of tasks each client will pre-download and
@@ -126,7 +130,11 @@ class Connector:
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
-		self.channel.basic_qos(prefetch_size=0, prefetch_count=1, a_global=False)
+		self.channel.basic_qos(
+				prefetch_size  = self.prefetch_size,
+				prefetch_count = self.prefetch,
+				a_global       = False
+			)
 
 	def _setupQueues(self):
 
@@ -151,8 +159,6 @@ class Connector:
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
 		self.channel.queue_declare('nak.q', auto_delete=False)
 		self.channel.queue_bind('nak.q', exchange=self.response_exchange, routing_key="nak")
-
-
 
 
 	def _poll_proxy(self):
@@ -230,14 +236,25 @@ class Connector:
 		else:
 			in_queue = self.task_q
 
+		ret = 0
 
-		item = self.channel.basic_get(queue=in_queue)
-		if item:
-			self.log.info("Received packet from queue '{queue}'! Processing.".format(queue=in_queue))
-			item.channel.basic_ack(item.delivery_info['delivery_tag'])
-			self.taskQueue.put(item.body)
-			return 1
-		return 0
+		while True:
+			# Prevent never breaking from the loop if the feeding queue is backed up.
+			if ret > self.prefetch:
+				break
+
+			item = self.channel.basic_get(queue=in_queue)
+			if item:
+				self.log.info("Received packet from queue '{queue}'! Processing.".format(queue=in_queue))
+				item.channel.basic_ack(item.delivery_info['delivery_tag'])
+				self.taskQueue.put(item.body)
+				ret += 1
+			else:
+				break
+
+		if ret:
+			self.log.info("Retreived %s items!", ret)
+		return ret
 
 	def _publishOutgoing(self):
 
