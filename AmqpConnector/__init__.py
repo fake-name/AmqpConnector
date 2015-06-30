@@ -29,6 +29,8 @@ class Connector:
 					poll_rate              = 0.25,
 					prefetch               = 1,
 					prefetch_size          = 0,
+					session_fetch_limit    = None,
+					durable                = False,
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
@@ -39,6 +41,15 @@ class Connector:
 		self.poll_rate     = poll_rate
 		self.prefetch      = prefetch
 		self.prefetch_size = prefetch_size
+		self.durable       = durable
+
+		# The session fetch limit allows control of the total number of
+		# AMQP messages the instance of `Connector()` will *ever* fetch in it's
+		# entire lifetime.
+		# If none, there will be no limit.
+		self.session_fetch_limit = session_fetch_limit
+		self.session_fetched     = 0
+		self.queue_fetched       = 0
 
 		# Number of tasks that have been retreived by this client.
 		# Used for limiting the number of tasks each client will pre-download and
@@ -50,6 +61,7 @@ class Connector:
 		self.log.info("Setting up AqmpConnector!")
 
 
+		self.log.info("Fetch limit: '%s'", self.session_fetch_limit)
 		self.log.info("Comsuming from queue '{conq}', emitting responses on '{tasq}'.".format(conq = task_queue, tasq=response_queue))
 		self.master = master
 
@@ -138,27 +150,27 @@ class Connector:
 
 	def _setupQueues(self):
 
-		self.channel.exchange_declare(self.task_exchange, type=self.task_exchange_type, auto_delete=False)
-		self.channel.exchange_declare(self.response_exchange, type=self.response_exchange_type, auto_delete=False)
+		self.channel.exchange_declare(self.task_exchange,     type=self.task_exchange_type,     auto_delete=False, durable=self.durable)
+		self.channel.exchange_declare(self.response_exchange, type=self.response_exchange_type, auto_delete=False, durable=self.durable)
 
 		# set up consumer and response queues
 		if self.master:
 			# Master has to declare the response queue so it can listen for responses
-			self.channel.queue_declare(self.response_q, auto_delete=False)
-			self.channel.queue_bind(self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
+			self.channel.queue_declare(self.response_q, auto_delete=False, durable=self.durable)
+			self.channel.queue_bind(   self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
 			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.response_q, ex=self.response_exchange))
 
 		if not self.master:
 			# Clients need to declare their task queues, so the master can publish into them.
-			self.channel.queue_declare(self.task_q, auto_delete=False)
-			self.channel.queue_bind(self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
+			self.channel.queue_declare(self.task_q, auto_delete=False, durable=self.durable)
+			self.channel.queue_bind(   self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
 			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.task_q, ex=self.task_exchange))
 
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
-		self.channel.queue_declare('nak.q', auto_delete=False)
-		self.channel.queue_bind('nak.q', exchange=self.response_exchange, routing_key="nak")
+		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.durable)
+		self.channel.queue_bind('nak.q',    exchange=self.response_exchange, routing_key="nak")
 
 
 	def _poll_proxy(self):
@@ -168,6 +180,7 @@ class Connector:
 		except KeyboardInterrupt:
 			self.log.warning("AQMP Connector thread interrupted by keyboard interrupt!")
 			self._poll()
+
 
 	def _poll(self):
 		'''
@@ -242,6 +255,8 @@ class Connector:
 			# Prevent never breaking from the loop if the feeding queue is backed up.
 			if ret > self.prefetch:
 				break
+			if self.atFetchLimit():
+				break
 
 			item = self.channel.basic_get(queue=in_queue)
 			if item:
@@ -249,6 +264,10 @@ class Connector:
 				item.channel.basic_ack(item.delivery_info['delivery_tag'])
 				self.taskQueue.put(item.body)
 				ret += 1
+
+				self.session_fetched += 1
+				if self.atFetchLimit():
+					self.log.info("Session fetch limit reached. Not fetching any additional content.")
 			else:
 				break
 
@@ -277,14 +296,43 @@ class Connector:
 					break
 
 
+
+	def atFetchLimit(self):
+		'''
+		Track the fetch-limit for the active session. Used to allow an instance to connect,
+		fetch one (and only one) item, and then do things with the fetched item without
+		having the background thread fetch and queue a bunch more items while it's working.
+		'''
+		if not self.session_fetch_limit:
+			return False
+
+		return self.session_fetched >= self.session_fetch_limit
+
+	def atQueueLimit(self):
+		'''
+		Track the fetch-limit for the active session. Used to allow an instance to connect,
+		fetch one (and only one) item, and then do things with the fetched item without
+		having the background thread fetch and queue a bunch more items while it's working.
+		'''
+		if not self.session_fetch_limit:
+			return False
+
+		return self.queue_fetched >= self.session_fetch_limit
+
+
 	def getMessage(self):
 		'''
 		Try to fetch a message from the receiving Queue.
 		Returns the method if there is one, False if there is not.
 		Non-Blocking.
 		'''
+
+		if self.atQueueLimit():
+			raise ValueError("Out of fetchable items!")
+
 		try:
 			put = self.taskQueue.get_nowait()
+			self.queue_fetched += 1
 			return put
 		except queue.Empty:
 			return None
