@@ -289,6 +289,8 @@ class Connector:
 					put = self.responseQueue.get_nowait()
 					self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
 					message = amqp.basic_message.Message(body=put)
+					if self.durable:
+						message.properties["delivery_mode"] = 2
 					self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
 					self.active -= 1
 
