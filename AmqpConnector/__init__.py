@@ -345,6 +345,11 @@ class Connector:
 		'''
 		self.responseQueue.put(message)
 
+	def outgoingItemSize(self):
+		'''
+		Get how many items are in the outgoing queue.
+		'''
+		return self.responseQueue.qsize()
 
 
 	def stop(self):
