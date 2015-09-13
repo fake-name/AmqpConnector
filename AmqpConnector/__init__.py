@@ -28,18 +28,9 @@ class Connector:
 					ssl                    = None,
 					poll_rate              = 0.25,
 					prefetch               = 1,
-					prefetch_size          = 9999999,
 					session_fetch_limit    = None,
 					durable                = False,
 				):
-
-		print("Connector Initializing!")
-		print("	master:        ", master)
-		print("	synchronous:   ", synchronous)
-		print("	flush_queues:  ", flush_queues)
-		print("	poll_rate:     ", poll_rate)
-		print("	prefetch:      ", prefetch)
-		print("	prefetch_size: ", prefetch_size)
 
 		# The synchronous flag controls whether the connector should limit itself
 		# to consuming one message at-a-time.
@@ -48,7 +39,6 @@ class Connector:
 		self.synchronous   = synchronous
 		self.poll_rate     = poll_rate
 		self.prefetch      = prefetch
-		self.prefetch_size = prefetch_size
 		self.durable       = durable
 
 		# The session fetch limit allows control of the total number of
@@ -150,40 +140,16 @@ class Connector:
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
-		# print("Setting Connection QoS parameters")
-		# self.connection.basic_qos(
-		# 		prefetch_size  = self.prefetch_size,
-		# 		prefetch_count = self.prefetch,
-		# 		a_global       = False
-		# 	)
-		self.log.info("Setting channel QoS")
 		self.channel.basic_qos(
-				prefetch_size  = self.prefetch_size,
+				prefetch_size  = 0,
 				prefetch_count = self.prefetch,
 				a_global       = False
 			)
-		self.log.info("QoS set")
-
 
 	def _setupQueues(self):
 
-
 		self.channel.exchange_declare(self.task_exchange,     type=self.task_exchange_type,     auto_delete=False, durable=self.durable)
 		self.channel.exchange_declare(self.response_exchange, type=self.response_exchange_type, auto_delete=False, durable=self.durable)
-
-		if self.master:
-			bindq = self.response_q
-			respe = self.response_exchange
-		else:
-			bindq = self.task_q
-			respe = self.task_exchange
-
-
-		# # Clients need to declare their task queues, so the master can publish into them.
-		# self.channel.queue_declare(bindq, auto_delete=False, durable=self.durable)
-		# self.channel.queue_bind(   bindq, exchange=respe, routing_key=bindq.split(".")[0])
-		# self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=bindq, ex=respe))
-
 
 		# set up consumer and response queues
 		if self.master:
@@ -192,7 +158,7 @@ class Connector:
 			self.channel.queue_bind(   self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
 			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.response_q, ex=self.response_exchange))
 
-		if not self.master:
+		else:
 			# Clients need to declare their task queues, so the master can publish into them.
 			self.channel.queue_declare(self.task_q, auto_delete=False, durable=self.durable)
 			self.channel.queue_bind(   self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
@@ -203,17 +169,6 @@ class Connector:
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
 		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.durable)
 		self.channel.queue_bind('nak.q',    exchange=self.response_exchange, routing_key="nak")
-
-
-		# Async mode uses rx callbacks, sync mode uses blocking calls
-		if not self.synchronous:
-			self.log.info("Installing callback for async mode!")
-			self.channel.basic_consume(bindq,   callback=self._rx_callback)
-			self.channel.basic_consume('nak.q', callback=self._rx_callback)
-			self.log.info("Callbacks attached. Setting flow")
-			self.channel.flow(True)
-			self.log.info("Flow set")
-
 
 
 	def _poll_proxy(self):
@@ -240,7 +195,6 @@ class Connector:
 		integrator = 0               # Time since last status message emitted.
 		loop_delay = self.poll_rate  # Poll interval for queues.
 
-		self.log.info("Entering runloop")
 		while self.run:
 
 			try:
@@ -257,12 +211,8 @@ class Connector:
 
 					if integrator > print_time:
 						self.log.info("Looping, waiting for job.")
+					self.active += self._processReceiving()
 
-
-					if self.synchronous:
-						self.active += self._processReceiving()
-					else:
-						self.channel.wait()
 				else:
 					if integrator > print_time:
 						self.log.info("Active task running.")
@@ -289,16 +239,6 @@ class Connector:
 		self.connection.close()
 		self.log.info("AMQP Thread exited")
 
-	def _rx_callback(self, message):
-		if self.master:
-			in_queue = self.response_q
-		else:
-			in_queue = self.task_q
-
-		self.log.info("Received packet from queue '{queue}'! Processing.".format(queue=in_queue))
-		message.channel.basic_ack(message.delivery_info['delivery_tag'])
-		self.taskQueue.put(message.body)
-
 	def _processReceiving(self):
 
 
@@ -322,8 +262,6 @@ class Connector:
 				item.channel.basic_ack(item.delivery_info['delivery_tag'])
 				self.taskQueue.put(item.body)
 				ret += 1
-
-				print("Retreived item! Items in queue: ", self.taskQueue.qsize())
 
 				self.session_fetched += 1
 				if self.atFetchLimit():
@@ -405,11 +343,6 @@ class Connector:
 		'''
 		self.responseQueue.put(message)
 
-	def outgoingItemSize(self):
-		'''
-		Get how many items are in the outgoing queue.
-		'''
-		return self.responseQueue.qsize()
 
 
 	def stop(self):
