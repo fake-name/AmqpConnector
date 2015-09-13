@@ -3,6 +3,7 @@ import amqp
 import traceback
 import logging
 import threading
+import multiprocessing
 import queue
 import time
 
@@ -116,8 +117,11 @@ class Connector:
 
 
 		# set up the task and response queues.
-		self.taskQueue = queue.Queue()
-		self.responseQueue = queue.Queue()
+		# These need to be multiprocessing queues because
+		# messages can sometimes be inserted from a different process
+		# then the interface is created in.
+		self.taskQueue = multiprocessing.Queue()
+		self.responseQueue = multiprocessing.Queue()
 
 
 		# Threading logic
@@ -158,7 +162,7 @@ class Connector:
 			self.channel.queue_bind(   self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
 			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.response_q, ex=self.response_exchange))
 
-		else:
+		if not self.master:
 			# Clients need to declare their task queues, so the master can publish into them.
 			self.channel.queue_declare(self.task_q, auto_delete=False, durable=self.durable)
 			self.channel.queue_bind(   self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
@@ -218,7 +222,6 @@ class Connector:
 						self.log.info("Active task running.")
 
 				self._publishOutgoing()
-
 				# Reset the print integrator.
 				if integrator > 5:
 					integrator = 0
@@ -274,7 +277,6 @@ class Connector:
 		return ret
 
 	def _publishOutgoing(self):
-
 			if self.master:
 				out_queue = self.task_exchange
 				out_key   = self.task_q.split(".")[0]
