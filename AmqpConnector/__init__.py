@@ -199,7 +199,9 @@ class Connector:
 		integrator = 0               # Time since last status message emitted.
 		loop_delay = self.poll_rate  # Poll interval for queues.
 
-		while self.run:
+		# When run is false, don't halt until
+		# we've flushed the outgoing items out the queue
+		while self.run or self.responseQueue.qsize():
 
 			try:
 				# Kick over heartbeat
@@ -211,7 +213,7 @@ class Connector:
 				self.connection.heartbeat_tick()
 				self.connection.send_heartbeat()
 				time.sleep(loop_delay)
-				if self.active == 0 or not self.synchronous:
+				if (self.active == 0 or not self.synchronous) and self.run:
 
 					if integrator > print_time:
 						self.log.info("Looping, waiting for job.")
@@ -354,6 +356,11 @@ class Connector:
 		'''
 		self.log.info("Stopping AMQP interface thread.")
 		self.run = False
+		while self.responseQueue.qsize() > 0:
+			self.log.info("%s remaining outgoing AMQP items.", self.responseQueue.qsize())
+			time.sleep(1)
+
+
 		self.thread.join()
 		self.log.info("AMQP interface thread halted.")
 
