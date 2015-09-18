@@ -176,6 +176,18 @@ class Connector:
 
 
 	def _poll_proxy(self):
+
+		if not self.synchronous:
+			if self.master:
+				in_queue = self.response_q
+			else:
+				in_queue = self.task_q
+
+			print("Connection contents:")
+			print(dir(self.channel))
+			print("")
+			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+
 		self.log.info("AMQP interface thread started.")
 		try:
 			self._poll()
@@ -213,7 +225,14 @@ class Connector:
 				self.connection.heartbeat_tick()
 				self.connection.send_heartbeat()
 				time.sleep(loop_delay)
-				if (self.active == 0 or not self.synchronous) and self.run:
+
+				if not self.synchronous:
+					# Async mode works via callbacks
+					# However, it doesn't have it's own thread, so we
+					# have to pass exec to the connection ourselves.
+					self.connection.drain_events(timeout=1)
+
+				elif self.active == 0 and self.synchronous and self.run:
 
 					if integrator > print_time:
 						self.log.info("Looping, waiting for job.")
@@ -242,7 +261,16 @@ class Connector:
 
 		self.log.info("AMQP Thread Exiting")
 		self.connection.close()
+
+		self.connection.drain_events(timeout=10)
 		self.log.info("AMQP Thread exited")
+
+	def _message_callback(self, msg):
+		self.log.info("Received packet via callback! Processing.")
+		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+		self.taskQueue.put(msg.body)
+
+
 
 	def _processReceiving(self):
 
@@ -341,10 +369,17 @@ class Connector:
 		except queue.Empty:
 			return None
 
-	def putMessage(self, message):
+	def putMessage(self, message, synchronous=False):
 		'''
 		Place a message into the outgoing queue.
+
+		if synchronous is true, this call will block until
+		the items in the outgoing queue are less then the
+		value of synchronous
 		'''
+		if synchronous:
+			while self.responseQueue.qsize() > synchronous:
+				time.sleep(0.1)
 		self.responseQueue.put(message)
 
 
