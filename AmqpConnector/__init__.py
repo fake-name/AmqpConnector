@@ -1,5 +1,6 @@
 
 import amqp
+import socket
 import traceback
 import logging
 import threading
@@ -183,9 +184,6 @@ class Connector:
 			else:
 				in_queue = self.task_q
 
-			print("Connection contents:")
-			print(dir(self.channel))
-			print("")
 			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
 
 		self.log.info("AMQP interface thread started.")
@@ -230,7 +228,12 @@ class Connector:
 					# Async mode works via callbacks
 					# However, it doesn't have it's own thread, so we
 					# have to pass exec to the connection ourselves.
-					self.connection.drain_events(timeout=1)
+					try:
+						self.connection.drain_events(timeout=1)
+					except socket.timeout:
+						# drain_events raises socket.timeout
+						# if there are no messages
+						pass
 
 				elif self.active == 0 and self.synchronous and self.run:
 
@@ -249,6 +252,7 @@ class Connector:
 				integrator += loop_delay
 			except amqp.Connection.connection_errors:
 				self.log.error("Connection dropped! Attempting to reconnect!")
+				traceback.print_exc()
 				try:
 					self.connection.close()
 				except Exception:
@@ -260,9 +264,14 @@ class Connector:
 				self._setupQueues()
 
 		self.log.info("AMQP Thread Exiting")
+
+		# Stop the flow of new items
+		self.channel.flow(False)
+
+		# Close the connection once it's empty.
+		self.channel.close()
 		self.connection.close()
 
-		self.connection.drain_events(timeout=10)
 		self.log.info("AMQP Thread exited")
 
 	def _message_callback(self, msg):
@@ -395,6 +404,7 @@ class Connector:
 			self.log.info("%s remaining outgoing AMQP items.", self.responseQueue.qsize())
 			time.sleep(1)
 
+		self.log.info("%s remaining outgoing AMQP items.", self.responseQueue.qsize())
 
 		self.thread.join()
 		self.log.info("AMQP interface thread halted.")
