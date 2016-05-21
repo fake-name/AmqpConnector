@@ -266,7 +266,8 @@ class Connector:
 		self.log.info("AMQP Thread Exiting")
 
 		# Stop the flow of new items
-		self.channel.flow(False)
+		# self.channel.flow(False)
+		# Apparently flow is now disabled.
 
 		# Close the connection once it's empty.
 		self.channel.close()
