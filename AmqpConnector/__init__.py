@@ -250,7 +250,9 @@ class Connector:
 				if integrator > 5:
 					integrator = 0
 				integrator += loop_delay
-			except amqp.Connection.connection_errors:
+
+			# The connection dropping throws OSError sometimes, for some reason.
+			except (amqp.Connection.connection_errors, OSError):
 				self.log.error("Connection dropped! Attempting to reconnect!")
 				traceback.print_exc()
 				try:
@@ -259,7 +261,7 @@ class Connector:
 					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
 					for line in traceback.format_exc().split('\n'):
 						self.log.error(line)
-
+				time.sleep(5)
 				self._connect()
 				self._setupQueues()
 
