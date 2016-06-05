@@ -78,6 +78,7 @@ class Connector:
 		self.response_q        = response_queue
 		self.task_exchange     = task_exchange
 		self.response_exchange = response_exchange
+		self.flush_queues      = flush_queues
 
 		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
 		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
@@ -109,12 +110,6 @@ class Connector:
 		self.task_exchange_type = task_exchange_type
 		self.response_exchange_type = response_exchange_type
 
-		self._connect()
-		self._setupQueues()
-
-		if flush_queues:
-			self.channel.queue_purge(self.task_q)
-			self.channel.queue_purge(self.response_q)
 
 
 		# set up the task and response queues.
@@ -135,6 +130,11 @@ class Connector:
 
 	def _connect(self):
 
+		self.log.info("Initializing AMQP connection.")
+		if self.flush_queues:
+			self.channel.queue_purge(self.task_q)
+			self.channel.queue_purge(self.response_q)
+
 		# Connect to server
 		self.connection = amqp.connection.Connection(host        =self.host,
 													userid       =self.userid,
@@ -150,6 +150,22 @@ class Connector:
 				prefetch_count = self.prefetch,
 				a_global       = False
 			)
+		self.log.info("Connection established. Setting up consumer.")
+
+
+		if self.synchronous:
+			self.log.info("Note: Running in synchronous mode!")
+		else:
+			self.log.info("Note: Running in asyncronous mode!")
+			if self.master:
+				in_queue = self.response_q
+			else:
+				in_queue = self.task_q
+
+			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+
+		self.log.info("Configuring queues.")
+		self._setupQueues()
 
 	def _setupQueues(self):
 
@@ -161,13 +177,13 @@ class Connector:
 			# Master has to declare the response queue so it can listen for responses
 			self.channel.queue_declare(self.response_q, auto_delete=False, durable=self.durable)
 			self.channel.queue_bind(   self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
-			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.response_q, ex=self.response_exchange))
+			self.log.info("Binding queue %s to exchange %s.", self.response_q, self.response_exchange)
 
 		if not self.master:
 			# Clients need to declare their task queues, so the master can publish into them.
 			self.channel.queue_declare(self.task_q, auto_delete=False, durable=self.durable)
 			self.channel.queue_bind(   self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
-			self.log.info("Binding queue {queue} to exchange {ex}.".format(queue=self.task_q, ex=self.task_exchange))
+			self.log.info("Binding queue %s to exchange %s.", self.task_q, self.task_exchange)
 
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
@@ -178,13 +194,7 @@ class Connector:
 
 	def _poll_proxy(self):
 
-		if not self.synchronous:
-			if self.master:
-				in_queue = self.response_q
-			else:
-				in_queue = self.task_q
-
-			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+		self._connect()
 
 		self.log.info("AMQP interface thread started.")
 		try:
@@ -203,6 +213,13 @@ class Connector:
 
 		NOTE: Maximum throughput is 4 messages-second, limited by the internal poll-rate.
 		'''
+
+		# _connect() is called in _poll_proxy before _poll is called, so
+		# we /should/ be connected by the time this point is reached. In any
+		# event, it should fine even if that is somehow not true, since
+		# the interface calls should
+		connected = True
+
 		lastHeartbeat = self.connection.last_heartbeat_received
 
 		print_time = 15              # Print a status message every n seconds
@@ -214,6 +231,9 @@ class Connector:
 		while self.run or self.responseQueue.qsize():
 
 			try:
+				if not connected:
+					self._connect()
+					connected = True
 				# Kick over heartbeat
 				if self.connection.last_heartbeat_received != lastHeartbeat:
 					lastHeartbeat = self.connection.last_heartbeat_received
@@ -253,7 +273,7 @@ class Connector:
 
 			# The connection dropping throws OSError sometimes, for some reason.
 			except amqp.Connection.connection_errors:
-				self.log.error("Connection dropped (amqp.Connection.connection_errors)! Attempting to reconnect!")
+				self.log.error("Connection dropped (amqp.Connection.connection_errors)!")
 				traceback.print_exc()
 				try:
 					self.connection.close()
@@ -262,8 +282,8 @@ class Connector:
 					for line in traceback.format_exc().split('\n'):
 						self.log.error(line)
 				time.sleep(5)
-				self._connect()
-				self._setupQueues()
+				self.log.info("Attempting to reconnect.")
+				connected = False
 
 			except OSError:
 				self.log.error("Connection dropped (OSError)! Attempting to reconnect!")
@@ -275,8 +295,7 @@ class Connector:
 					for line in traceback.format_exc().split('\n'):
 						self.log.error(line)
 				time.sleep(5)
-				self._connect()
-				self._setupQueues()
+				connected = False
 
 		self.log.info("AMQP Thread Exiting")
 
@@ -316,7 +335,7 @@ class Connector:
 
 			item = self.channel.basic_get(queue=in_queue)
 			if item:
-				self.log.info("Received packet from queue '{queue}'! Processing.".format(queue=in_queue))
+				self.log.info("Received packet from queue '%s'! Processing.", in_queue)
 				item.channel.basic_ack(item.delivery_info['delivery_tag'])
 				self.taskQueue.put(item.body)
 				ret += 1
