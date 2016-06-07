@@ -310,7 +310,7 @@ class Connector:
 		self.log.info("AMQP Thread exited")
 
 	def _message_callback(self, msg):
-		self.log.info("Received packet via callback! Processing.")
+		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.taskQueue.qsize())
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.taskQueue.put(msg.body)
 
