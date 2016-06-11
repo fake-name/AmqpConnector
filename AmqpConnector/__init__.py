@@ -32,16 +32,19 @@ class Connector:
 					prefetch               = 1,
 					session_fetch_limit    = None,
 					durable                = False,
+					socket_timeout         = 10,
 				):
 
 		# The synchronous flag controls whether the connector should limit itself
 		# to consuming one message at-a-time.
 		# This is used for clients, which should only retreive one message, process it,
 		# send a response, and only then retreive another.
-		self.synchronous   = synchronous
-		self.poll_rate     = poll_rate
-		self.prefetch      = prefetch
-		self.durable       = durable
+		self.synchronous    = synchronous
+		self.poll_rate      = poll_rate
+		self.prefetch       = prefetch
+		self.durable        = durable
+
+		self.socket_timeout = socket_timeout
 
 		# The session fetch limit allows control of the total number of
 		# AMQP messages the instance of `Connector()` will *ever* fetch in it's
@@ -136,12 +139,15 @@ class Connector:
 			self.channel.queue_purge(self.response_q)
 
 		# Connect to server
-		self.connection = amqp.connection.Connection(host        =self.host,
-													userid       =self.userid,
-													password     =self.password,
-													virtual_host =self.virtual_host,
-													heartbeat    =self.heartbeat,
-													ssl          =self.sslopts)
+		self.connection = amqp.connection.Connection(host           = self.host,
+													userid          = self.userid,
+													password        = self.password,
+													virtual_host    = self.virtual_host,
+													heartbeat       = self.heartbeat,
+													ssl             = self.sslopts,
+													connect_timeout = self.socket_timeout,
+													read_timeout    = self.socket_timeout,
+													write_timeout   = self.socket_timeout)
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
@@ -281,7 +287,7 @@ class Connector:
 					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
 					for line in traceback.format_exc().split('\n'):
 						self.log.error(line)
-				time.sleep(5)
+				time.sleep(loop_delay)
 				self.log.info("Attempting to reconnect.")
 				connected = False
 
@@ -294,7 +300,7 @@ class Connector:
 					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
 					for line in traceback.format_exc().split('\n'):
 						self.log.error(line)
-				time.sleep(5)
+				time.sleep(loop_delay)
 				connected = False
 
 		self.log.info("AMQP Thread Exiting")
