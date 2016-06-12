@@ -9,135 +9,45 @@ import queue
 import time
 
 
-class Connector:
-
-	def __init__(
-					self,
-					host                   = None,
-					userid                 = 'guest',
-					password               = 'guest',
-					virtual_host           = '/',
-					task_queue             = 'task.q',
-					response_queue         = 'response.q',
-					task_exchange          = 'tasks.e',
-					task_exchange_type     = 'direct',
-					response_exchange      = 'resps.e',
-					response_exchange_type = 'direct',
-					master                 = False,
-					synchronous            = True,
-					flush_queues           = False,
-					heartbeat              = 60*5,
-					ssl                    = None,
-					poll_rate              = 0.25,
-					prefetch               = 1,
-					session_fetch_limit    = None,
-					durable                = False,
-					socket_timeout         = 10,
-				):
-
-		# The synchronous flag controls whether the connector should limit itself
-		# to consuming one message at-a-time.
-		# This is used for clients, which should only retreive one message, process it,
-		# send a response, and only then retreive another.
-		self.synchronous    = synchronous
-		self.poll_rate      = poll_rate
-		self.prefetch       = prefetch
-		self.durable        = durable
-
-		self.socket_timeout = socket_timeout
-
-		# The session fetch limit allows control of the total number of
-		# AMQP messages the instance of `Connector()` will *ever* fetch in it's
-		# entire lifetime.
-		# If none, there will be no limit.
-		self.session_fetch_limit = session_fetch_limit
-		self.session_fetched     = 0
-		self.queue_fetched       = 0
-
-		# Number of tasks that have been retreived by this client.
-		# Used for limiting the number of tasks each client will pre-download and
-		# place in it's internal queues.
-		self.active      = 0
-
-		self.log = logging.getLogger("Main.Connector")
-
-		self.log.info("Setting up AqmpConnector!")
+class ConnectorManager:
+	def __init__(self, config, runstate, task_queue, response_queue):
+		self.log = logging.getLogger("Main.Connector.Internal")
+		self.runstate       = runstate
+		self.config         = config
+		self.task_queue     = task_queue
+		self.response_queue = response_queue
 
 
-		self.log.info("Fetch limit: '%s'", self.session_fetch_limit)
-		self.log.info("Comsuming from queue '{conq}', emitting responses on '{tasq}'.".format(conq = task_queue, tasq=response_queue))
-		self.master = master
+		# config = {
+		# 	'host'                   : kwargs.get('host',                   None),
+		# 	'userid'                 : kwargs.get('userid',                 'guest'),
+		# 	'password'               : kwargs.get('password',               'guest'),
+		# 	'virtual_host'           : kwargs.get('virtual_host',           '/'),
+		# 	'task_queue'             : kwargs.get('task_queue',             'task.q'),
+		# 	'response_queue'         : kwargs.get('response_queue',         'response.q'),
+		# 	'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
+		# 	'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
+		# 	'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
+		# 	'response_exchange_type' : kwargs.get('response_exchange_type', 'direct'),
+		# 	'master'                 : kwargs.get('master',                 False),
+		# 	'synchronous'            : kwargs.get('synchronous',            True),
+		# 	'flush_queues'           : kwargs.get('flush_queues',           False),
+		# 	'heartbeat'              : kwargs.get('heartbeat',              60*5),
+		# 	'ssl'                    : kwargs.get('ssl',                    None),
+		# 	'poll_rate'              : kwargs.get('poll_rate',              0.25),
+		# 	'prefetch'               : kwargs.get('prefetch',               1),
+		# 	'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
+		# 	'durable'                : kwargs.get('durable',                False),
+		# 	'socket_timeout'         : kwargs.get('socket_timeout',         10),
+		# }
 
-		# Validity-Check args
-		if not host:
-			raise ValueError("You must specify a host to connect to!")
-		assert        task_queue.endswith(".q") == True
-		assert    response_queue.endswith(".q") == True
-		assert     task_exchange.endswith(".e") == True
-		assert response_exchange.endswith(".e") == True
+	def run(self):
+		pass
 
-		# Move args into class variables
-		self.task_q            = task_queue
-		self.response_q        = response_queue
-		self.task_exchange     = task_exchange
-		self.response_exchange = response_exchange
-		self.flush_queues      = flush_queues
-
-		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
-		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
-		# can pass arbitrary kwargs.
-		self.sslopts    = ssl
-
-		# Declare here to shut up pylint.
-		self.connection = None
-		self.channel    = None
-
-		# Patch in the port number to the host name if it's not present.
-		# This is really clumsy, but you can't explicitly specify the port
-		# in the amqp library
-		if not ":" in host:
-			if ssl:
-				host += ":5671"
-			else:
-				host += ":5672"
-
-
-		# Shove connection parameters into class member variables, so they'll
-		# hang around when needed for reconnecting.
-		self.host         = host
-		self.userid       = userid
-		self.password     = password
-		self.virtual_host = virtual_host
-		self.heartbeat    = heartbeat
-
-		self.task_exchange_type = task_exchange_type
-		self.response_exchange_type = response_exchange_type
-
-
-
-		# set up the task and response queues.
-		# These need to be multiprocessing queues because
-		# messages can sometimes be inserted from a different process
-		# then the interface is created in.
-		self.taskQueue = multiprocessing.Queue()
-		self.responseQueue = multiprocessing.Queue()
-
-
-		# Threading logic
-		self.run = True
-
-		# self.poll()
-		self.log.info("Starting AMQP interface thread.")
-		self.thread = threading.Thread(target=self._poll_proxy, daemon=True)
-		self.thread.start()
 
 	def _connect(self):
 
 		self.log.info("Initializing AMQP connection.")
-		if self.flush_queues:
-			self.channel.queue_purge(self.task_q)
-			self.channel.queue_purge(self.response_q)
-
 		# Connect to server
 		self.connection = amqp.connection.Connection(host           = self.host,
 													userid          = self.userid,
@@ -156,7 +66,14 @@ class Connector:
 				prefetch_count = self.prefetch,
 				a_global       = False
 			)
+
+
 		self.log.info("Connection established. Setting up consumer.")
+
+		if self.config['flush_queues']:
+			self.log.info("Flushing items in queue.")
+			self.channel.queue_purge(self.config['task_q'])
+			self.channel.queue_purge(self.config['response_q'])
 
 
 		if self.synchronous:
@@ -197,7 +114,6 @@ class Connector:
 		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.durable)
 		self.channel.queue_bind('nak.q',    exchange=self.response_exchange, routing_key="nak")
 
-
 	def _poll_proxy(self):
 
 		self._connect()
@@ -208,7 +124,6 @@ class Connector:
 		except KeyboardInterrupt:
 			self.log.warning("AQMP Connector thread interrupted by keyboard interrupt!")
 			self._poll()
-
 
 	def _poll(self):
 		'''
@@ -320,8 +235,6 @@ class Connector:
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.taskQueue.put(msg.body)
 
-
-
 	def _processReceiving(self):
 
 
@@ -377,8 +290,6 @@ class Connector:
 				except queue.Empty:
 					break
 
-
-
 	def atFetchLimit(self):
 		'''
 		Track the fetch-limit for the active session. Used to allow an instance to connect,
@@ -389,6 +300,156 @@ class Connector:
 			return False
 
 		return self.session_fetched >= self.session_fetch_limit
+
+	def atQueueLimit(self):
+		'''
+		Track the fetch-limit for the active session. Used to allow an instance to connect,
+		fetch one (and only one) item, and then do things with the fetched item without
+		having the background thread fetch and queue a bunch more items while it's working.
+		'''
+		if not self.session_fetch_limit:
+			return False
+
+		return self.queue_fetched >= self.session_fetch_limit
+
+
+
+def run_fetcher(config, runstate, tx_q, rx_q):
+	'''
+		# The synchronous flag controls whether the connector should limit itself
+		# to consuming one message at-a-time.
+		# This is used for clients, which should only retreive one message, process it,
+		# send a response, and only then retreive another.
+		self.synchronous    = synchronous
+		self.poll_rate      = poll_rate
+		self.prefetch       = prefetch
+		self.durable        = durable
+
+		self.socket_timeout = socket_timeout
+
+		# The session fetch limit allows control of the total number of
+		# AMQP messages the instance of `Connector()` will *ever* fetch in it's
+		# entire lifetime.
+		# If none, there will be no limit.
+		self.session_fetch_limit = session_fetch_limit
+		self.session_fetched     = 0
+		self.queue_fetched       = 0
+
+		# Number of tasks that have been retreived by this client.
+		# Used for limiting the number of tasks each client will pre-download and
+		# place in it's internal queues.
+		self.active      = 0
+
+
+
+		self.master = master
+
+
+		# Move args into class variables
+		self.task_q            = task_queue
+		self.response_q        = response_queue
+		self.task_exchange     = task_exchange
+		self.response_exchange = response_exchange
+		self.flush_queues      = flush_queues
+
+		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
+		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
+		# can pass arbitrary kwargs.
+		self.sslopts    = ssl
+
+		# Declare here to shut up pylint.
+		self.connection = None
+		self.channel    = None
+
+
+		# Shove connection parameters into class member variables, so they'll
+		# hang around when needed for reconnecting.
+		self.host         = host
+		self.userid       = userid
+		self.password     = password
+		self.virtual_host = virtual_host
+		self.heartbeat    = heartbeat
+
+		self.task_exchange_type = task_exchange_type
+		self.response_exchange_type = response_exchange_type
+
+	'''
+
+	print("Worker call")
+	while runstate.value:
+		time.sleep(1)
+	print("Worker exiting")
+
+class Connector:
+
+	def __init__(self, *args, **kwargs):
+
+		assert args == (), "All arguments must be passed as keyword arguments. Positional arguments: '%s'" % (args, )
+
+		self.log = logging.getLogger("Main.Connector")
+
+		self.log.info("Setting up AqmpConnector!")
+
+		config = {
+			'host'                   : kwargs.get('host',                   None),
+			'userid'                 : kwargs.get('userid',                 'guest'),
+			'password'               : kwargs.get('password',               'guest'),
+			'virtual_host'           : kwargs.get('virtual_host',           '/'),
+			'task_queue'             : kwargs.get('task_queue',             'task.q'),
+			'response_queue'         : kwargs.get('response_queue',         'response.q'),
+			'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
+			'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
+			'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
+			'response_exchange_type' : kwargs.get('response_exchange_type', 'direct'),
+			'master'                 : kwargs.get('master',                 False),
+			'synchronous'            : kwargs.get('synchronous',            True),
+			'flush_queues'           : kwargs.get('flush_queues',           False),
+			'heartbeat'              : kwargs.get('heartbeat',              60*5),
+			'ssl'                    : kwargs.get('ssl',                    None),
+			'poll_rate'              : kwargs.get('poll_rate',              0.25),
+			'prefetch'               : kwargs.get('prefetch',               1),
+			'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
+			'durable'                : kwargs.get('durable',                False),
+			'socket_timeout'         : kwargs.get('socket_timeout',         10),
+		}
+
+		self.log.info("Fetch limit: '%s'", config['session_fetch_limit'])
+		self.log.info("Comsuming from queue '%s', emitting responses on '%s'.", config['task_queue'], config['response_queue'])
+
+		# Validity-Check args
+		if not config['host']:
+			raise ValueError("You must specify a host to connect to!")
+		assert        config['task_queue'].endswith(".q") is True
+		assert    config['response_queue'].endswith(".q") is True
+		assert     config['task_exchange'].endswith(".e") is True
+		assert config['response_exchange'].endswith(".e") is True
+
+
+		# Patch in the port number to the host name if it's not present.
+		# This is really clumsy, but you can't explicitly specify the port
+		# in the amqp library
+		if not ":" in config['host']:
+			if config['ssl']:
+				config['host'] += ":5671"
+			else:
+				config['host'] += ":5672"
+
+		self.session_fetch_limit = config['session_fetch_limit']
+		self.queue_fetched       = 0
+
+		# set up the task and response queues.
+		# These need to be multiprocessing queues because
+		# messages can sometimes be inserted from a different process
+		# then the interface is created in.
+		self.taskQueue = multiprocessing.Queue()
+		self.responseQueue = multiprocessing.Queue()
+
+		self.runstate = multiprocessing.Value("b", 1)
+
+		self.log.info("Starting AMQP interface thread.")
+		self.thread = threading.Thread(target=run_fetcher, args=(config, self.runstate, self.taskQueue, self.responseQueue), daemon=False)
+		self.thread.start()
+
 
 	def atQueueLimit(self):
 		'''
@@ -440,7 +501,7 @@ class Connector:
 		Will block until the queue has been cleanly shut down.
 		'''
 		self.log.info("Stopping AMQP interface thread.")
-		self.run = False
+		self.runstate.value = 0
 		while self.responseQueue.qsize() > 0:
 			self.log.info("%s remaining outgoing AMQP items.", self.responseQueue.qsize())
 			time.sleep(1)
@@ -450,6 +511,10 @@ class Connector:
 		self.thread.join()
 		self.log.info("AMQP interface thread halted.")
 
+	def __del__(self):
+		print("deleter: ", self.runstate, self.runstate.value)
+		if self.runstate.value:
+			self.stop()
 
 def test():
 	import json

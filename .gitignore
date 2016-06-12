@@ -2,3 +2,6 @@
 /AmqpConnector/__pycache__
 /build/lib/AmqpConnector
 /dist
+/test/*.pyc
+__pycache__
+/venv
