@@ -54,7 +54,7 @@ setup(
 
 	# Dependent packages (distributions)
 	install_requires=[
-		"amqp<2.0.0",
+		"amqp>=2.0.0",
 	],
 )
 
