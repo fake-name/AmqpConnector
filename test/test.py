@@ -1,5 +1,6 @@
 
 import AmqpConnector
+import time
 import logging
 import ssl
 import os.path
@@ -69,14 +70,35 @@ class RabbitQueueHandler(object):
 
 
 
-def test():
+def test1(s):
+	s['master'] = True
+	print(s)
+	tmp = RabbitQueueHandler(s)
+	print("Putting message")
+	tmp.connector.putMessage("Oh hai?")
+	print("Message sent")
+	time.sleep(5)
+	print("Exiting....")
+
+
+def test2(s):
+	s['master'] = False
+	print(s)
+	tmp = RabbitQueueHandler(s)
+	time.sleep(5)
+	new = tmp.connector.getMessage()
+	print("Message:", new)
+	print("Exiting....")
+
+def test_ms():
+
+	import test.logSetup
+	test.logSetup.initLogging()
 	import json
 	with open("settings.json") as sfp:
 		s = json.loads(sfp.read())
-	print(s)
-	tmp = RabbitQueueHandler(s)
-	print("wut")
-
+	test1(s)
+	test2(s)
 
 if __name__ == '__main__':
-	test()
+	test_ms()

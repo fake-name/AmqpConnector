@@ -23,8 +23,8 @@ class ConnectorManager:
 		# 	'userid'                 : kwargs.get('userid',                 'guest'),
 		# 	'password'               : kwargs.get('password',               'guest'),
 		# 	'virtual_host'           : kwargs.get('virtual_host',           '/'),
-		# 	'task_queue'             : kwargs.get('task_queue',             'task.q'),
-		# 	'response_queue'         : kwargs.get('response_queue',         'response.q'),
+		# 	'task_queue_name'             : kwargs.get('task_queue_name',             'task.q'),
+		# 	'response_queue_name'         : kwargs.get('response_queue_name',         'response.q'),
 		# 	'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
 		# 	'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
 		# 	'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
@@ -41,29 +41,62 @@ class ConnectorManager:
 		# 	'socket_timeout'         : kwargs.get('socket_timeout',         10),
 		# }
 
-	def run(self):
-		pass
+
+		assert 'host'                   in config
+		assert 'userid'                 in config
+		assert 'password'               in config
+		assert 'virtual_host'           in config
+		assert 'task_queue_name'             in config
+		assert 'response_queue_name'         in config
+		assert 'task_exchange'          in config
+		assert 'task_exchange_type'     in config
+		assert 'response_exchange'      in config
+		assert 'response_exchange_type' in config
+		assert 'master'                 in config
+		assert 'synchronous'            in config
+		assert 'flush_queues'           in config
+		assert 'heartbeat'              in config
+		assert 'sslopts'                in config
+		assert 'poll_rate'              in config
+		assert 'prefetch'               in config
+		assert 'session_fetch_limit'    in config
+		assert 'durable'                in config
+		assert 'socket_timeout'         in config
+
+		self.config         = config
+		self.runstate       = runstate
+		self.task_queue     = task_queue
+		self.response_queue = response_queue
+
+
+		self.session_fetched     = 0
+		self.queue_fetched       = 0
+		self.active              = 0
+
+		self._connect()
 
 
 	def _connect(self):
 
 		self.log.info("Initializing AMQP connection.")
 		# Connect to server
-		self.connection = amqp.connection.Connection(host           = self.host,
-													userid          = self.userid,
-													password        = self.password,
-													virtual_host    = self.virtual_host,
-													heartbeat       = self.heartbeat,
-													ssl             = self.sslopts,
-													connect_timeout = self.socket_timeout,
-													read_timeout    = self.socket_timeout,
-													write_timeout   = self.socket_timeout)
+		self.connection = amqp.connection.Connection(host           = self.config['host'],
+													userid          = self.config['userid'],
+													password        = self.config['password'],
+													virtual_host    = self.config['virtual_host'],
+													heartbeat       = self.config['heartbeat'],
+													ssl             = self.config['sslopts'],
+													connect_timeout = self.config['socket_timeout'],
+													read_timeout    = self.config['socket_timeout'],
+													write_timeout   = self.config['socket_timeout'])
+
+		self.connection.connect()
 
 		# Channel and exchange setup
 		self.channel = self.connection.channel()
 		self.channel.basic_qos(
 				prefetch_size  = 0,
-				prefetch_count = self.prefetch,
+				prefetch_count = self.config['prefetch'],
 				a_global       = False
 			)
 
@@ -72,60 +105,52 @@ class ConnectorManager:
 
 		if self.config['flush_queues']:
 			self.log.info("Flushing items in queue.")
-			self.channel.queue_purge(self.config['task_q'])
-			self.channel.queue_purge(self.config['response_q'])
-
-
-		if self.synchronous:
-			self.log.info("Note: Running in synchronous mode!")
-		else:
-			self.log.info("Note: Running in asyncronous mode!")
-			if self.master:
-				in_queue = self.response_q
-			else:
-				in_queue = self.task_q
-
-			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+			self.channel.queue_purge(self.config['task_queue_name'])
+			self.channel.queue_purge(self.config['response_queue_name'])
 
 		self.log.info("Configuring queues.")
 		self._setupQueues()
 
+		if self.config['synchronous']:
+			self.log.info("Note: Running in synchronous mode!")
+		else:
+			self.log.info("Note: Running in asyncronous mode!")
+			if self.config['master']:
+				in_queue = self.config['response_queue_name']
+			else:
+				in_queue = self.config['task_queue_name']
+
+			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+
+
 	def _setupQueues(self):
 
-		self.channel.exchange_declare(self.task_exchange,     type=self.task_exchange_type,     auto_delete=False, durable=self.durable)
-		self.channel.exchange_declare(self.response_exchange, type=self.response_exchange_type, auto_delete=False, durable=self.durable)
+		self.channel.exchange_declare(self.config['task_exchange'],     type=self.config['task_exchange_type'],     auto_delete=False, durable=self.config['durable'])
+		self.channel.exchange_declare(self.config['response_exchange'], type=self.config['response_exchange_type'], auto_delete=False, durable=self.config['durable'])
 
 		# set up consumer and response queues
-		if self.master:
+		if self.config['master']:
 			# Master has to declare the response queue so it can listen for responses
-			self.channel.queue_declare(self.response_q, auto_delete=False, durable=self.durable)
-			self.channel.queue_bind(   self.response_q, exchange=self.response_exchange, routing_key=self.response_q.split(".")[0])
-			self.log.info("Binding queue %s to exchange %s.", self.response_q, self.response_exchange)
+			self.channel.queue_declare(self.config['response_queue_name'], auto_delete=False, durable=self.config['durable'])
+			self.channel.queue_bind(   self.config['response_queue_name'], exchange=self.config['response_exchange'], routing_key=self.config['response_queue_name'].split(".")[0])
+			self.log.info("Binding queue %s to exchange %s.", self.config['response_queue_name'], self.config['response_exchange'])
 
-		if not self.master:
+		if not self.config['master']:
 			# Clients need to declare their task queues, so the master can publish into them.
-			self.channel.queue_declare(self.task_q, auto_delete=False, durable=self.durable)
-			self.channel.queue_bind(   self.task_q, exchange=self.task_exchange, routing_key=self.task_q.split(".")[0])
-			self.log.info("Binding queue %s to exchange %s.", self.task_q, self.task_exchange)
+			self.channel.queue_declare(self.config['task_queue_name'], auto_delete=False, durable=self.config['durable'])
+			self.channel.queue_bind(   self.config['task_queue_name'], exchange=self.config['task_exchange'], routing_key=self.config['task_queue_name'].split(".")[0])
+			self.log.info("Binding queue %s to exchange %s.", self.config['task_queue_name'], self.config['task_exchange'])
 
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
-		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.durable)
-		self.channel.queue_bind('nak.q',    exchange=self.response_exchange, routing_key="nak")
+		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.config['durable'])
+		self.channel.queue_bind('nak.q',    exchange=self.config['response_exchange'], routing_key="nak")
 
-	def _poll_proxy(self):
 
-		self._connect()
 
-		self.log.info("AMQP interface thread started.")
-		try:
-			self._poll()
-		except KeyboardInterrupt:
-			self.log.warning("AQMP Connector thread interrupted by keyboard interrupt!")
-			self._poll()
 
-	def _poll(self):
+	def poll(self):
 		'''
 		Internal function.
 		Polls the AMQP interface, processing any messages received on it.
@@ -145,109 +170,93 @@ class ConnectorManager:
 
 		print_time = 15              # Print a status message every n seconds
 		integrator = 0               # Time since last status message emitted.
-		loop_delay = self.poll_rate  # Poll interval for queues.
+		loop_delay = self.config['poll_rate']  # Poll interval for queues.
 
 		# When run is false, don't halt until
 		# we've flushed the outgoing items out the queue
-		while self.run or self.responseQueue.qsize():
+		while self.runstate.value or self.response_queue.qsize():
 
-			try:
-				if not connected:
-					self._connect()
-					connected = True
-				# Kick over heartbeat
-				if self.connection.last_heartbeat_received != lastHeartbeat:
-					lastHeartbeat = self.connection.last_heartbeat_received
-					if integrator > print_time:
-						self.log.info("Heartbeat tick received: %s", lastHeartbeat)
+			if not connected:
+				self._connect()
+				connected = True
+			# Kick over heartbeat
+			if self.connection.last_heartbeat_received != lastHeartbeat:
+				lastHeartbeat = self.connection.last_heartbeat_received
+				if integrator > print_time:
+					self.log.info("Heartbeat tick received: %s", lastHeartbeat)
 
-				self.connection.heartbeat_tick()
-				self.connection.send_heartbeat()
-				time.sleep(loop_delay)
+			self.connection.heartbeat_tick()
+			self.connection.send_heartbeat()
+			time.sleep(loop_delay)
 
-				if not self.synchronous:
-					# Async mode works via callbacks
-					# However, it doesn't have it's own thread, so we
-					# have to pass exec to the connection ourselves.
-					try:
-						self.connection.drain_events(timeout=1)
-					except socket.timeout:
-						# drain_events raises socket.timeout
-						# if there are no messages
-						pass
-
-				elif self.active == 0 and self.synchronous and self.run:
-
-					if integrator > print_time:
-						self.log.info("Looping, waiting for job.")
-					self.active += self._processReceiving()
-
-				else:
-					if integrator > print_time:
-						self.log.info("Active task running.")
-
-				self._publishOutgoing()
-				# Reset the print integrator.
-				if integrator > 5:
-					integrator = 0
-				integrator += loop_delay
-
-			# The connection dropping throws OSError sometimes, for some reason.
-			except amqp.Connection.connection_errors:
-				self.log.error("Connection dropped (amqp.Connection.connection_errors)!")
-				traceback.print_exc()
+			if not self.config['synchronous']:
+				# Async mode works via callbacks
+				# However, it doesn't have it's own thread, so we
+				# have to pass exec to the connection ourselves.
 				try:
-					self.connection.close()
-				except Exception:
-					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
-					for line in traceback.format_exc().split('\n'):
-						self.log.error(line)
-				time.sleep(loop_delay)
-				self.log.info("Attempting to reconnect.")
-				connected = False
+					self.connection.drain_events(timeout=1)
+				except socket.timeout:
+					# drain_events raises socket.timeout
+					# if there are no messages
+					pass
 
-			except OSError:
-				self.log.error("Connection dropped (OSError)! Attempting to reconnect!")
-				traceback.print_exc()
-				try:
-					self.connection.close()
-				except Exception:
-					self.log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
-					for line in traceback.format_exc().split('\n'):
-						self.log.error(line)
-				time.sleep(loop_delay)
-				connected = False
+			elif self.active == 0 and self.config['synchronous'] and self.runstate.value:
+
+				if integrator > print_time:
+					self.log.info("Looping, waiting for job.")
+				self.active += self._processReceiving()
+
+			else:
+				if integrator > print_time:
+					self.log.info("Active task running.")
+
+			self._publishOutgoing()
+			# Reset the print integrator.
+			if integrator > 5:
+				integrator = 0
+			integrator += loop_delay
 
 		self.log.info("AMQP Thread Exiting")
 
 		# Stop the flow of new items
-		# self.channel.flow(False)
-		# Apparently flow is now disabled.
+		self.channel.basic_qos(
+				prefetch_size  = 0,
+				prefetch_count = 0,
+				a_global       = False
+			)
 
 		# Close the connection once it's empty.
-		self.channel.close()
-		self.connection.close()
+		try:
+			self.channel.close()
+			self.connection.close()
+		except amqp.exceptions.AMQPError as e:
+			# We don't really care about exceptions on teardown
+			self.log.error("Error on interface teardown!")
+			self.log.error("	%s", e)
+			# for line in traceback.format_exc().split('\n'):
+			# 	self.log.error(line)
+			pass
 
 		self.log.info("AMQP Thread exited")
 
 	def _message_callback(self, msg):
-		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.taskQueue.qsize())
+		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
-		self.taskQueue.put(msg.body)
+		self.task_queue.put(msg.body)
 
 	def _processReceiving(self):
 
 
-		if self.master:
-			in_queue = self.response_q
+		if self.config['master']:
+			in_queue = self.config['response_queue_name']
 		else:
-			in_queue = self.task_q
+			in_queue = self.config['task_queue_name']
 
 		ret = 0
 
 		while True:
 			# Prevent never breaking from the loop if the feeding queue is backed up.
-			if ret > self.prefetch:
+			if ret > self.config['prefetch']:
 				break
 			if self.atFetchLimit():
 				break
@@ -256,7 +265,7 @@ class ConnectorManager:
 			if item:
 				self.log.info("Received packet from queue '%s'! Processing.", in_queue)
 				item.channel.basic_ack(item.delivery_info['delivery_tag'])
-				self.taskQueue.put(item.body)
+				self.task_queue.put(item.body)
 				ret += 1
 
 				self.session_fetched += 1
@@ -270,25 +279,25 @@ class ConnectorManager:
 		return ret
 
 	def _publishOutgoing(self):
-			if self.master:
-				out_queue = self.task_exchange
-				out_key   = self.task_q.split(".")[0]
-			else:
-				out_queue = self.response_exchange
-				out_key   = self.response_q.split(".")[0]
+		if self.config['master']:
+			out_queue = self.config['task_exchange']
+			out_key   = self.config['task_queue_name'].split(".")[0]
+		else:
+			out_queue = self.config['response_exchange']
+			out_key   = self.config['response_queue_name'].split(".")[0]
 
-			while 1:
-				try:
-					put = self.responseQueue.get_nowait()
-					# self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
-					message = amqp.basic_message.Message(body=put)
-					if self.durable:
-						message.properties["delivery_mode"] = 2
-					self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
-					self.active -= 1
+		while 1:
+			try:
+				put = self.response_queue.get_nowait()
+				# self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
+				message = amqp.basic_message.Message(body=put)
+				if self.config['durable']:
+					message.properties["delivery_mode"] = 2
+				self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
+				self.active -= 1
 
-				except queue.Empty:
-					break
+			except queue.Empty:
+				break
 
 	def atFetchLimit(self):
 		'''
@@ -296,21 +305,10 @@ class ConnectorManager:
 		fetch one (and only one) item, and then do things with the fetched item without
 		having the background thread fetch and queue a bunch more items while it's working.
 		'''
-		if not self.session_fetch_limit:
+		if not self.config['session_fetch_limit']:
 			return False
 
-		return self.session_fetched >= self.session_fetch_limit
-
-	def atQueueLimit(self):
-		'''
-		Track the fetch-limit for the active session. Used to allow an instance to connect,
-		fetch one (and only one) item, and then do things with the fetched item without
-		having the background thread fetch and queue a bunch more items while it's working.
-		'''
-		if not self.session_fetch_limit:
-			return False
-
-		return self.queue_fetched >= self.session_fetch_limit
+		return self.session_fetched >= self.config['session_fetch_limit']
 
 
 
@@ -375,10 +373,34 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 
 	'''
 
-	print("Worker call")
+	log = logging.getLogger("Main.Connector.Manager")
+
+	log.info("Worker thread starting up.")
+	connection = False
 	while runstate.value:
-		time.sleep(1)
-	print("Worker exiting")
+		try:
+			if connection is False:
+				connection = ConnectorManager(config, runstate, tx_q, rx_q)
+			connection.poll()
+
+		except Exception:
+			log.error("Exception in connector! Terminating connection...")
+			for line in traceback.format_exc().split('\n'):
+				log.error(line)
+			try:
+				del connection
+			except Exception:
+				log.info("")
+				log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
+				for line in traceback.format_exc().split('\n'):
+					log.error(line)
+			if runstate.value:
+				log.error("Reconnecting...")
+				connection = ConnectorManager(config, runstate, tx_q, rx_q)
+				connection = False
+
+
+	log.info("Worker thread has terminated.")
 
 class Connector:
 
@@ -395,8 +417,8 @@ class Connector:
 			'userid'                 : kwargs.get('userid',                 'guest'),
 			'password'               : kwargs.get('password',               'guest'),
 			'virtual_host'           : kwargs.get('virtual_host',           '/'),
-			'task_queue'             : kwargs.get('task_queue',             'task.q'),
-			'response_queue'         : kwargs.get('response_queue',         'response.q'),
+			'task_queue_name'        : kwargs.get('task_queue',             'task.q'),
+			'response_queue_name'    : kwargs.get('response_queue',         'response.q'),
 			'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
 			'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
 			'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
@@ -404,8 +426,8 @@ class Connector:
 			'master'                 : kwargs.get('master',                 False),
 			'synchronous'            : kwargs.get('synchronous',            True),
 			'flush_queues'           : kwargs.get('flush_queues',           False),
-			'heartbeat'              : kwargs.get('heartbeat',              60*5),
-			'ssl'                    : kwargs.get('ssl',                    None),
+			'heartbeat'              : kwargs.get('heartbeat',              30),
+			'sslopts'                : kwargs.get('ssl',                    None),
 			'poll_rate'              : kwargs.get('poll_rate',              0.25),
 			'prefetch'               : kwargs.get('prefetch',               1),
 			'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
@@ -414,13 +436,13 @@ class Connector:
 		}
 
 		self.log.info("Fetch limit: '%s'", config['session_fetch_limit'])
-		self.log.info("Comsuming from queue '%s', emitting responses on '%s'.", config['task_queue'], config['response_queue'])
+		self.log.info("Comsuming from queue '%s', emitting responses on '%s'.", config['task_queue_name'], config['response_queue_name'])
 
 		# Validity-Check args
 		if not config['host']:
 			raise ValueError("You must specify a host to connect to!")
-		assert        config['task_queue'].endswith(".q") is True
-		assert    config['response_queue'].endswith(".q") is True
+		assert        config['task_queue_name'].endswith(".q") is True
+		assert    config['response_queue_name'].endswith(".q") is True
 		assert     config['task_exchange'].endswith(".e") is True
 		assert config['response_exchange'].endswith(".e") is True
 
@@ -512,7 +534,7 @@ class Connector:
 		self.log.info("AMQP interface thread halted.")
 
 	def __del__(self):
-		print("deleter: ", self.runstate, self.runstate.value)
+		# print("deleter: ", self.runstate, self.runstate.value)
 		if self.runstate.value:
 			self.stop()
 
@@ -546,7 +568,7 @@ def test():
 
 			new = con.getMessage()
 			if new:
-				print(new)
+				# print(new)
 				if not isMaster:
 					con.putMessage("Hi Thar!")
 
