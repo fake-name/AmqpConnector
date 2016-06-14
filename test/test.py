@@ -77,7 +77,7 @@ def test1(s):
 	print("Putting message")
 	tmp.connector.putMessage("Oh hai?")
 	print("Message sent")
-	time.sleep(5)
+	time.sleep(120)
 	print("Exiting....")
 
 
@@ -85,7 +85,7 @@ def test2(s):
 	s['master'] = False
 	print(s)
 	tmp = RabbitQueueHandler(s)
-	time.sleep(5)
+	time.sleep(120)
 	new = tmp.connector.getMessage()
 	print("Message:", new)
 	print("Exiting....")

@@ -8,6 +8,8 @@ import multiprocessing
 import queue
 import time
 
+class Heartbeat_Timeout_Exception(Exception):
+	pass
 
 class ConnectorManager:
 	def __init__(self, config, runstate, task_queue, response_queue):
@@ -42,36 +44,41 @@ class ConnectorManager:
 		# }
 
 
-		assert 'host'                   in config
-		assert 'userid'                 in config
-		assert 'password'               in config
-		assert 'virtual_host'           in config
-		assert 'task_queue_name'             in config
-		assert 'response_queue_name'         in config
-		assert 'task_exchange'          in config
-		assert 'task_exchange_type'     in config
-		assert 'response_exchange'      in config
-		assert 'response_exchange_type' in config
-		assert 'master'                 in config
-		assert 'synchronous'            in config
-		assert 'flush_queues'           in config
-		assert 'heartbeat'              in config
-		assert 'sslopts'                in config
-		assert 'poll_rate'              in config
-		assert 'prefetch'               in config
-		assert 'session_fetch_limit'    in config
-		assert 'durable'                in config
-		assert 'socket_timeout'         in config
+		assert 'host'                     in config
+		assert 'userid'                   in config
+		assert 'password'                 in config
+		assert 'virtual_host'             in config
+		assert 'task_queue_name'          in config
+		assert 'response_queue_name'      in config
+		assert 'task_exchange'            in config
+		assert 'task_exchange_type'       in config
+		assert 'response_exchange'        in config
+		assert 'response_exchange_type'   in config
+		assert 'master'                   in config
+		assert 'synchronous'              in config
+		assert 'flush_queues'             in config
+		assert 'heartbeat'                in config
+		assert 'sslopts'                  in config
+		assert 'poll_rate'                in config
+		assert 'prefetch'                 in config
+		assert 'session_fetch_limit'      in config
+		assert 'durable'                  in config
+		assert 'socket_timeout'           in config
+		assert 'hearbeat_packet_interval' in config
+		assert 'hearbeat_packet_timeout'  in config
 
 		self.config         = config
 		self.runstate       = runstate
 		self.task_queue     = task_queue
 		self.response_queue = response_queue
 
+		self.session_fetched        = 0
+		self.queue_fetched          = 0
+		self.active                 = 0
+		self.last_hearbeat_sent     = time.time()
+		self.last_hearbeat_received = time.time()
 
-		self.session_fetched     = 0
-		self.queue_fetched       = 0
-		self.active              = 0
+		self.keepalive_exchange_name = "keepalive_exchange"+str(id("wat"))
 
 		self._connect()
 
@@ -144,9 +151,10 @@ class ConnectorManager:
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
-		self.channel.queue_declare('nak.q', auto_delete=False, durable=self.config['durable'])
-		self.channel.queue_bind('nak.q',    exchange=self.config['response_exchange'], routing_key="nak")
-
+		self.channel.exchange_declare(self.keepalive_exchange_name, type="direct", auto_delete=True, durable=False)
+		self.channel.queue_declare('nak.q', auto_delete=False, durable=False)
+		self.channel.queue_bind('nak.q',    exchange=self.keepalive_exchange_name, routing_key="nak")
+		self.channel.basic_consume(queue='nak.q', callback=self._hearbeat_callback)
 
 
 
@@ -184,6 +192,18 @@ class ConnectorManager:
 				lastHeartbeat = self.connection.last_heartbeat_received
 				if integrator > print_time:
 					self.log.info("Heartbeat tick received: %s", lastHeartbeat)
+
+			# hearbeat_packet_interval
+			# hearbeat_packet_timeout
+			if self.last_hearbeat_sent + self.config['hearbeat_packet_interval'] < time.time():
+				self.log.info("Keepalive ping!")
+				self.last_hearbeat_sent += self.config['hearbeat_packet_interval']
+				msg = amqp.basic_message.Message(body="keepalive")
+				self.channel.basic_publish(msg, exchange=self.keepalive_exchange_name, routing_key="nak")
+
+			# If the heartbeat has been missing for greater then the timeout, throw an exception
+			if self.last_hearbeat_received + self.config['hearbeat_packet_timeout'] < time.time():
+				raise Heartbeat_Timeout_Exception("Heartbeat missed")
 
 			self.connection.heartbeat_tick()
 			self.connection.send_heartbeat()
@@ -235,9 +255,14 @@ class ConnectorManager:
 			self.log.error("	%s", e)
 			# for line in traceback.format_exc().split('\n'):
 			# 	self.log.error(line)
-			pass
 
 		self.log.info("AMQP Thread exited")
+
+	def _hearbeat_callback(self, msg):
+		# self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
+		self.log.info("Heartbeat ping received!")
+		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+		self.last_hearbeat_received = time.time()
 
 	def _message_callback(self, msg):
 		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
@@ -413,26 +438,29 @@ class Connector:
 		self.log.info("Setting up AqmpConnector!")
 
 		config = {
-			'host'                   : kwargs.get('host',                   None),
-			'userid'                 : kwargs.get('userid',                 'guest'),
-			'password'               : kwargs.get('password',               'guest'),
-			'virtual_host'           : kwargs.get('virtual_host',           '/'),
-			'task_queue_name'        : kwargs.get('task_queue',             'task.q'),
-			'response_queue_name'    : kwargs.get('response_queue',         'response.q'),
-			'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
-			'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
-			'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
-			'response_exchange_type' : kwargs.get('response_exchange_type', 'direct'),
-			'master'                 : kwargs.get('master',                 False),
-			'synchronous'            : kwargs.get('synchronous',            True),
-			'flush_queues'           : kwargs.get('flush_queues',           False),
-			'heartbeat'              : kwargs.get('heartbeat',              30),
-			'sslopts'                : kwargs.get('ssl',                    None),
-			'poll_rate'              : kwargs.get('poll_rate',              0.25),
-			'prefetch'               : kwargs.get('prefetch',               1),
-			'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
-			'durable'                : kwargs.get('durable',                False),
-			'socket_timeout'         : kwargs.get('socket_timeout',         10),
+			'host'                     : kwargs.get('host',                     None),
+			'userid'                   : kwargs.get('userid',                   'guest'),
+			'password'                 : kwargs.get('password',                 'guest'),
+			'virtual_host'             : kwargs.get('virtual_host',             '/'),
+			'task_queue_name'          : kwargs.get('task_queue',               'task.q'),
+			'response_queue_name'      : kwargs.get('response_queue',           'response.q'),
+			'task_exchange'            : kwargs.get('task_exchange',            'tasks.e'),
+			'task_exchange_type'       : kwargs.get('task_exchange_type',       'direct'),
+			'response_exchange'        : kwargs.get('response_exchange',        'resps.e'),
+			'response_exchange_type'   : kwargs.get('response_exchange_type',   'direct'),
+			'master'                   : kwargs.get('master',                   False),
+			'synchronous'              : kwargs.get('synchronous',              True),
+			'flush_queues'             : kwargs.get('flush_queues',             False),
+			'heartbeat'                : kwargs.get('heartbeat',                30),
+			'sslopts'                  : kwargs.get('ssl',                      None),
+			'poll_rate'                : kwargs.get('poll_rate',                0.25),
+			'prefetch'                 : kwargs.get('prefetch',                 1),
+			'session_fetch_limit'      : kwargs.get('session_fetch_limit',      None),
+			'durable'                  : kwargs.get('durable',                  False),
+			'socket_timeout'           : kwargs.get('socket_timeout',           10),
+
+			'hearbeat_packet_interval' : kwargs.get('hearbeat_packet_interval', 10),
+			'hearbeat_packet_timeout'  : kwargs.get('hearbeat_packet_timeout',  30),
 		}
 
 		self.log.info("Fetch limit: '%s'", config['session_fetch_limit'])
@@ -441,11 +469,11 @@ class Connector:
 		# Validity-Check args
 		if not config['host']:
 			raise ValueError("You must specify a host to connect to!")
+
 		assert        config['task_queue_name'].endswith(".q") is True
 		assert    config['response_queue_name'].endswith(".q") is True
 		assert     config['task_exchange'].endswith(".e") is True
 		assert config['response_exchange'].endswith(".e") is True
-
 
 		# Patch in the port number to the host name if it's not present.
 		# This is really clumsy, but you can't explicitly specify the port
