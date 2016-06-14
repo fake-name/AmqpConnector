@@ -8,40 +8,18 @@ import multiprocessing
 import queue
 import time
 
+
 class Heartbeat_Timeout_Exception(Exception):
 	pass
 
 class ConnectorManager:
-	def __init__(self, config, runstate, task_queue, response_queue):
+	def __init__(self, config, runstate, active, task_queue, response_queue):
 		self.log = logging.getLogger("Main.Connector.Internal")
-		self.runstate       = runstate
-		self.config         = config
-		self.task_queue     = task_queue
-		self.response_queue = response_queue
-
-
-		# config = {
-		# 	'host'                   : kwargs.get('host',                   None),
-		# 	'userid'                 : kwargs.get('userid',                 'guest'),
-		# 	'password'               : kwargs.get('password',               'guest'),
-		# 	'virtual_host'           : kwargs.get('virtual_host',           '/'),
-		# 	'task_queue_name'             : kwargs.get('task_queue_name',             'task.q'),
-		# 	'response_queue_name'         : kwargs.get('response_queue_name',         'response.q'),
-		# 	'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
-		# 	'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
-		# 	'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
-		# 	'response_exchange_type' : kwargs.get('response_exchange_type', 'direct'),
-		# 	'master'                 : kwargs.get('master',                 False),
-		# 	'synchronous'            : kwargs.get('synchronous',            True),
-		# 	'flush_queues'           : kwargs.get('flush_queues',           False),
-		# 	'heartbeat'              : kwargs.get('heartbeat',              60*5),
-		# 	'ssl'                    : kwargs.get('ssl',                    None),
-		# 	'poll_rate'              : kwargs.get('poll_rate',              0.25),
-		# 	'prefetch'               : kwargs.get('prefetch',               1),
-		# 	'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
-		# 	'durable'                : kwargs.get('durable',                False),
-		# 	'socket_timeout'         : kwargs.get('socket_timeout',         10),
-		# }
+		self.runstate           = runstate
+		self.config             = config
+		self.task_queue         = task_queue
+		self.active_connections = active
+		self.response_queue     = response_queue
 
 
 		assert 'host'                     in config
@@ -67,10 +45,6 @@ class ConnectorManager:
 		assert 'hearbeat_packet_interval' in config
 		assert 'hearbeat_packet_timeout'  in config
 
-		self.config         = config
-		self.runstate       = runstate
-		self.task_queue     = task_queue
-		self.response_queue = response_queue
 
 		self.session_fetched        = 0
 		self.queue_fetched          = 0
@@ -78,12 +52,63 @@ class ConnectorManager:
 		self.last_hearbeat_sent     = time.time()
 		self.last_hearbeat_received = time.time()
 
+		self.sent_messages = 0
+		self.recv_messages = 0
+
+		self.connection     = None
+		self.channel        = None
+
 		self.keepalive_exchange_name = "keepalive_exchange"+str(id("wat"))
 
 		self._connect()
 
 
+
+
+		# config = {
+		# 	'host'                   : kwargs.get('host',                   None),
+		# 	'userid'                 : kwargs.get('userid',                 'guest'),
+		# 	'password'               : kwargs.get('password',               'guest'),
+		# 	'virtual_host'           : kwargs.get('virtual_host',           '/'),
+		# 	'task_queue_name'             : kwargs.get('task_queue_name',             'task.q'),
+		# 	'response_queue_name'         : kwargs.get('response_queue_name',         'response.q'),
+		# 	'task_exchange'          : kwargs.get('task_exchange',          'tasks.e'),
+		# 	'task_exchange_type'     : kwargs.get('task_exchange_type',     'direct'),
+		# 	'response_exchange'      : kwargs.get('response_exchange',      'resps.e'),
+		# 	'response_exchange_type' : kwargs.get('response_exchange_type', 'direct'),
+		# 	'master'                 : kwargs.get('master',                 False),
+		# 	'synchronous'            : kwargs.get('synchronous',            True),
+		# 	'flush_queues'           : kwargs.get('flush_queues',           False),
+		# 	'heartbeat'              : kwargs.get('heartbeat',              60*5),
+		# 	'ssl'                    : kwargs.get('ssl',                    None),
+		# 	'poll_rate'              : kwargs.get('poll_rate',              0.25),
+		# 	'prefetch'               : kwargs.get('prefetch',               1),
+		# 	'session_fetch_limit'    : kwargs.get('session_fetch_limit',    None),
+		# 	'durable'                : kwargs.get('durable',                False),
+		# 	'socket_timeout'         : kwargs.get('socket_timeout',         10),
+		# }
+
+	def __del__(self):
+		try:
+			self.close()
+		except Exception:
+			pass
+
+		# Force everything closed, because we seem to have two instances somehow
+		self.connection     = None
+		self.channel        = None
+		self.config         = None
+		self.runstate       = None
+		self.task_queue     = None
+		self.response_queue = None
+
+		# Finally, deincrement the active count
+		self.active_connections.value = 0
+
 	def _connect(self):
+
+		assert self.active_connections.value == 0
+		self.active_connections.value = 1
 
 		self.log.info("Initializing AMQP connection.")
 		# Connect to server
@@ -237,7 +262,9 @@ class ConnectorManager:
 			integrator += loop_delay
 
 		self.log.info("AMQP Thread Exiting")
+		self.close()
 
+	def close(self):
 		# Stop the flow of new items
 		self.channel.basic_qos(
 				prefetch_size  = 0,
@@ -260,7 +287,7 @@ class ConnectorManager:
 
 	def _hearbeat_callback(self, msg):
 		# self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
-		self.log.info("Heartbeat ping received!")
+		self.log.info("Heartbeat ping received! Sent messages: %s. Received messages: %s", self.sent_messages, self.recv_messages)
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.last_hearbeat_received = time.time()
 
@@ -268,6 +295,7 @@ class ConnectorManager:
 		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.task_queue.put(msg.body)
+		self.recv_messages += 1
 
 	def _processReceiving(self):
 
@@ -291,6 +319,7 @@ class ConnectorManager:
 				self.log.info("Received packet from queue '%s'! Processing.", in_queue)
 				item.channel.basic_ack(item.delivery_info['delivery_tag'])
 				self.task_queue.put(item.body)
+				self.recv_messages += 1
 				ret += 1
 
 				self.session_fetched += 1
@@ -316,6 +345,7 @@ class ConnectorManager:
 				put = self.response_queue.get_nowait()
 				# self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
 				message = amqp.basic_message.Message(body=put)
+				self.sent_messages += 1
 				if self.config['durable']:
 					message.properties["delivery_mode"] = 2
 				self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
@@ -339,64 +369,12 @@ class ConnectorManager:
 
 def run_fetcher(config, runstate, tx_q, rx_q):
 	'''
-		# The synchronous flag controls whether the connector should limit itself
-		# to consuming one message at-a-time.
-		# This is used for clients, which should only retreive one message, process it,
-		# send a response, and only then retreive another.
-		self.synchronous    = synchronous
-		self.poll_rate      = poll_rate
-		self.prefetch       = prefetch
-		self.durable        = durable
 
-		self.socket_timeout = socket_timeout
-
-		# The session fetch limit allows control of the total number of
-		# AMQP messages the instance of `Connector()` will *ever* fetch in it's
-		# entire lifetime.
-		# If none, there will be no limit.
-		self.session_fetch_limit = session_fetch_limit
-		self.session_fetched     = 0
-		self.queue_fetched       = 0
-
-		# Number of tasks that have been retreived by this client.
-		# Used for limiting the number of tasks each client will pre-download and
-		# place in it's internal queues.
-		self.active      = 0
-
-
-
-		self.master = master
-
-
-		# Move args into class variables
-		self.task_q            = task_queue
-		self.response_q        = response_queue
-		self.task_exchange     = task_exchange
-		self.response_exchange = response_exchange
-		self.flush_queues      = flush_queues
-
-		# ssl gets passed directly to `ssl.wrap_socket` if it's a dict.
-		# The invocation is `ssl.wrap_socket(socket, **sslopts)`, so you
-		# can pass arbitrary kwargs.
-		self.sslopts    = ssl
-
-		# Declare here to shut up pylint.
-		self.connection = None
-		self.channel    = None
-
-
-		# Shove connection parameters into class member variables, so they'll
-		# hang around when needed for reconnecting.
-		self.host         = host
-		self.userid       = userid
-		self.password     = password
-		self.virtual_host = virtual_host
-		self.heartbeat    = heartbeat
-
-		self.task_exchange_type = task_exchange_type
-		self.response_exchange_type = response_exchange_type
 
 	'''
+
+	# Active instances tracker
+	active = multiprocessing.Value("i", 0)
 
 	log = logging.getLogger("Main.Connector.Manager")
 
@@ -405,7 +383,7 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 	while runstate.value:
 		try:
 			if connection is False:
-				connection = ConnectorManager(config, runstate, tx_q, rx_q)
+				connection = ConnectorManager(config, runstate, active, tx_q, rx_q)
 			connection.poll()
 
 		except Exception:
@@ -460,7 +438,7 @@ class Connector:
 			'socket_timeout'           : kwargs.get('socket_timeout',           10),
 
 			'hearbeat_packet_interval' : kwargs.get('hearbeat_packet_interval', 10),
-			'hearbeat_packet_timeout'  : kwargs.get('hearbeat_packet_timeout',  30),
+			'hearbeat_packet_timeout'  : kwargs.get('hearbeat_packet_timeout',  120),
 		}
 
 		self.log.info("Fetch limit: '%s'", config['session_fetch_limit'])
@@ -486,6 +464,7 @@ class Connector:
 
 		self.session_fetch_limit = config['session_fetch_limit']
 		self.queue_fetched       = 0
+		self.queue_put           = 0
 
 		# set up the task and response queues.
 		# These need to be multiprocessing queues because
@@ -528,6 +507,7 @@ class Connector:
 			self.queue_fetched += 1
 			return put
 		except queue.Empty:
+			self.log.info("No items to retreive from proxy queue. Total received: %s, total sent: %s", self.queue_fetched, self.queue_put)
 			return None
 
 	def putMessage(self, message, synchronous=False):
@@ -541,6 +521,7 @@ class Connector:
 		if synchronous:
 			while self.responseQueue.qsize() > synchronous:
 				time.sleep(0.1)
+		self.queue_put += 1
 		self.responseQueue.put(message)
 
 
