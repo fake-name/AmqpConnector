@@ -13,13 +13,6 @@ class Heartbeat_Timeout_Exception(Exception):
 
 class ConnectorManager:
 	def __init__(self, config, runstate, active, task_queue, response_queue):
-		self.log = logging.getLogger("Main.Connector.Internal")
-		self.runstate           = runstate
-		self.config             = config
-		self.task_queue         = task_queue
-		self.active_connections = active
-		self.response_queue     = response_queue
-
 
 		assert 'host'                     in config
 		assert 'userid'                   in config
@@ -43,6 +36,14 @@ class ConnectorManager:
 		assert 'socket_timeout'           in config
 		assert 'hearbeat_packet_interval' in config
 		assert 'hearbeat_packet_timeout'  in config
+
+
+		self.log = logging.getLogger("Main.Connector.Internal(%s)", config['virtual_host'])
+		self.runstate           = runstate
+		self.config             = config
+		self.task_queue         = task_queue
+		self.active_connections = active
+		self.response_queue     = response_queue
 
 
 		self.session_fetched        = 0
