@@ -505,9 +505,9 @@ class Connector:
 		try:
 			put = self.taskQueue.get_nowait()
 			self.queue_fetched += 1
+			self.log.info("Fetched item from proxy queue. Total received: %s, total sent: %s", self.queue_fetched, self.queue_put)
 			return put
 		except queue.Empty:
-			self.log.info("No items to retreive from proxy queue. Total received: %s, total sent: %s", self.queue_fetched, self.queue_put)
 			return None
 
 	def putMessage(self, message, synchronous=False):
