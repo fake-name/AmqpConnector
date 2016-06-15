@@ -8,7 +8,6 @@ import multiprocessing
 import queue
 import time
 
-
 class Heartbeat_Timeout_Exception(Exception):
 	pass
 
@@ -176,7 +175,7 @@ class ConnectorManager:
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
-		self.channel.exchange_declare(self.keepalive_exchange_name, type="direct", auto_delete=True, durable=False)
+		self.channel.exchange_declare(self.keepalive_exchange_name, type="direct", auto_delete=True, durable=False, arguments={"x-expires" : 5*60*1000})
 		self.channel.queue_declare('nak.q', auto_delete=False, durable=False)
 		self.channel.queue_bind('nak.q',    exchange=self.keepalive_exchange_name, routing_key="nak")
 		self.channel.basic_consume(queue='nak.q', callback=self._hearbeat_callback)
@@ -221,17 +220,17 @@ class ConnectorManager:
 			# hearbeat_packet_interval
 			# hearbeat_packet_timeout
 			if self.last_hearbeat_sent + self.config['hearbeat_packet_interval'] < time.time():
-				self.log.info("Keepalive ping!")
+				self.log.info("Keepalive ping! (last heartbeat: %s, %s)", self.connection.last_heartbeat_received, time.time()-self.last_hearbeat_received)
 				self.last_hearbeat_sent += self.config['hearbeat_packet_interval']
 				msg = amqp.basic_message.Message(body="keepalive")
 				self.channel.basic_publish(msg, exchange=self.keepalive_exchange_name, routing_key="nak")
+
+			self.connection.send_heartbeat()
 
 			# If the heartbeat has been missing for greater then the timeout, throw an exception
 			if self.last_hearbeat_received + self.config['hearbeat_packet_timeout'] < time.time():
 				raise Heartbeat_Timeout_Exception("Heartbeat missed")
 
-			self.connection.heartbeat_tick()
-			self.connection.send_heartbeat()
 			time.sleep(loop_delay)
 
 			if not self.config['synchronous']:
@@ -289,6 +288,7 @@ class ConnectorManager:
 		# self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
 		self.log.info("Heartbeat ping received! Sent messages: %s. Received messages: %s", self.sent_messages, self.recv_messages)
 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+		self.connection.send_heartbeat()
 		self.last_hearbeat_received = time.time()
 
 	def _message_callback(self, msg):
@@ -429,15 +429,15 @@ class Connector:
 			'master'                   : kwargs.get('master',                   False),
 			'synchronous'              : kwargs.get('synchronous',              True),
 			'flush_queues'             : kwargs.get('flush_queues',             False),
-			'heartbeat'                : kwargs.get('heartbeat',                30),
+			'heartbeat'                : kwargs.get('heartbeat',                 120),
 			'sslopts'                  : kwargs.get('ssl',                      None),
-			'poll_rate'                : kwargs.get('poll_rate',                0.25),
-			'prefetch'                 : kwargs.get('prefetch',                 1),
+			'poll_rate'                : kwargs.get('poll_rate',                  0.25),
+			'prefetch'                 : kwargs.get('prefetch',                   1),
 			'session_fetch_limit'      : kwargs.get('session_fetch_limit',      None),
 			'durable'                  : kwargs.get('durable',                  False),
-			'socket_timeout'           : kwargs.get('socket_timeout',           10),
+			'socket_timeout'           : kwargs.get('socket_timeout',            10),
 
-			'hearbeat_packet_interval' : kwargs.get('hearbeat_packet_interval', 10),
+			'hearbeat_packet_interval' : kwargs.get('hearbeat_packet_interval',  10),
 			'hearbeat_packet_timeout'  : kwargs.get('hearbeat_packet_timeout',  120),
 		}
 
