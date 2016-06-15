@@ -38,7 +38,7 @@ class ConnectorManager:
 		assert 'hearbeat_packet_timeout'  in config
 
 
-		self.log = logging.getLogger("Main.Connector.Internal(%s)", config['virtual_host'])
+		self.log = logging.getLogger("Main.Connector.Internal(%s)" % config['virtual_host'])
 		self.runstate           = runstate
 		self.config             = config
 		self.task_queue         = task_queue
