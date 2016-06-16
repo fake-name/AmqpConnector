@@ -381,7 +381,7 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 
 	log.info("Worker thread starting up.")
 	connection = False
-	while runstate.value:
+	while runstate.value != 0:
 		try:
 			if connection is False:
 				connection = ConnectorManager(config, runstate, active, tx_q, rx_q)
@@ -398,13 +398,19 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 				log.error("Failed pre-emptive closing before reconnection. May not be a problem?")
 				for line in traceback.format_exc().split('\n'):
 					log.error(line)
-			if runstate.value:
+			if runstate.value != 0:
 				log.error("Reconnecting...")
 				connection = ConnectorManager(config, runstate, tx_q, rx_q)
 				connection = False
 
 
+	log.info("")
+	log.info("")
+	log.info("")
 	log.info("Worker thread has terminated.")
+	log.info("")
+	log.info("")
+	log.info("")
 
 class Connector:
 
@@ -487,13 +493,13 @@ class Connector:
 			return
 		if self.thread and not self.thread.isAlive():
 			self.thread.join()
-			self.log.error()
-			self.log.error()
-			self.log.error()
+			self.log.error("")
+			self.log.error("")
+			self.log.error("")
 			self.log.error("Thread has died!")
-			self.log.error()
-			self.log.error()
-			self.log.error()
+			self.log.error("")
+			self.log.error("")
+			self.log.error("")
 
 		self.thread = threading.Thread(target=run_fetcher, args=(self.__config, self.runstate, self.taskQueue, self.responseQueue), daemon=False)
 		self.thread.start()
