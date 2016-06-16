@@ -477,9 +477,26 @@ class Connector:
 		self.runstate = multiprocessing.Value("b", 1)
 
 		self.log.info("Starting AMQP interface thread.")
-		self.thread = threading.Thread(target=run_fetcher, args=(config, self.runstate, self.taskQueue, self.responseQueue), daemon=False)
-		self.thread.start()
 
+		self.thread = None
+		self.__config = config
+		self.checkLaunchThread()
+
+	def checkLaunchThread(self):
+		if self.thread and self.thread.isAlive():
+			return
+		if self.thread and not self.thread.isAlive():
+			self.thread.join()
+			self.log.error()
+			self.log.error()
+			self.log.error()
+			self.log.error("Thread has died!")
+			self.log.error()
+			self.log.error()
+			self.log.error()
+
+		self.thread = threading.Thread(target=run_fetcher, args=(self.__config, self.runstate, self.taskQueue, self.responseQueue), daemon=False)
+		self.thread.start()
 
 	def atQueueLimit(self):
 		'''
@@ -499,7 +516,7 @@ class Connector:
 		Returns the method if there is one, False if there is not.
 		Non-Blocking.
 		'''
-
+		self.checkLaunchThread()
 		if self.atQueueLimit():
 			raise ValueError("Out of fetchable items!")
 
@@ -519,6 +536,7 @@ class Connector:
 		the items in the outgoing queue are less then the
 		value of synchronous
 		'''
+		self.checkLaunchThread()
 		if synchronous:
 			while self.responseQueue.qsize() > synchronous:
 				time.sleep(0.1)
