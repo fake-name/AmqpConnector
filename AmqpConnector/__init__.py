@@ -476,8 +476,8 @@ class Connector:
 		# These need to be multiprocessing queues because
 		# messages can sometimes be inserted from a different process
 		# then the interface is created in.
-		self.taskQueue = multiprocessing.Queue()
-		self.responseQueue = multiprocessing.Queue()
+		self.taskQueue = queue.Queue()
+		self.responseQueue = queue.Queue()
 
 		self.runstate = multiprocessing.Value("b", 1)
 
