@@ -399,9 +399,8 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 				for line in traceback.format_exc().split('\n'):
 					log.error(line)
 			if runstate.value != 0:
-				log.error("Reconnecting...")
-				connection = ConnectorManager(config, runstate, tx_q, rx_q)
 				connection = False
+				log.error("Triggering reconnection...")
 
 
 	log.info("")
