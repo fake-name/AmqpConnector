@@ -229,7 +229,7 @@ class ConnectorManager:
 				msg = amqp.basic_message.Message(body="keepalive")
 				self.channel.basic_publish(msg, exchange=self.keepalive_exchange_name, routing_key="nak")
 
-			self.connection.send_heartbeat()
+			self.connection.heartbeat_tick(rate=self.config['hearbeat_packet_interval'])
 
 			# If the heartbeat has been missing for greater then the timeout, throw an exception
 			if self.last_hearbeat_received + self.config['hearbeat_packet_timeout'] < time.time():
@@ -408,11 +408,7 @@ def run_fetcher(config, runstate, tx_q, rx_q):
 
 
 	log.info("")
-	log.info("")
-	log.info("")
 	log.info("Worker thread has terminated.")
-	log.info("")
-	log.info("")
 	log.info("")
 
 class Connector:

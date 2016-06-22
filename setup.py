@@ -30,7 +30,7 @@ setup(
 	name="AmqpConnector",
 
 	# Version number (initial):
-	version="0.1.7",
+	version="0.1.8",
 
 	# Application author details:
 	author="Connor Wolf",
