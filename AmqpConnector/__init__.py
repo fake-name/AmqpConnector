@@ -61,6 +61,8 @@ class ConnectorManager:
 
 		self.keepalive_exchange_name = "keepalive_exchange"+str(id("wat"))
 
+		self.delivered = 0
+
 		self._connect()
 
 
@@ -296,7 +298,10 @@ class ConnectorManager:
 		self.last_hearbeat_received = time.time()
 
 	def _message_callback(self, msg):
-		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
+		self.delivered += 1
+		if self.delivered >= 25:
+			self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
+			self.delivered = 0
 		if self.config['ack_rx']:
 			msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.task_queue.put(msg.body)
@@ -374,7 +379,7 @@ class ConnectorManager:
 
 def run_fetcher(config, runstate, tx_q, rx_q):
 	'''
-
+	bleh
 
 	'''
 
@@ -484,6 +489,8 @@ class Connector:
 
 		self.log.info("Starting AMQP interface thread.")
 
+		self.forwarded = 0
+
 		self.thread = None
 		self.__config = config
 		self.checkLaunchThread()
@@ -529,7 +536,10 @@ class Connector:
 		try:
 			put = self.taskQueue.get_nowait()
 			self.queue_fetched += 1
-			self.log.info("Fetched item from proxy queue. Total received: %s, total sent: %s", self.queue_fetched, self.queue_put)
+			self.forwarded += 1
+			if self.forwarded >= 25:
+				self.log.info("Fetched item from proxy queue. Total received: %s, total sent: %s", self.queue_fetched, self.queue_put)
+				self.forwarded = 0
 			return put
 		except queue.Empty:
 			return None
