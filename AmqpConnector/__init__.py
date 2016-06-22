@@ -36,6 +36,7 @@ class ConnectorManager:
 		assert 'socket_timeout'           in config
 		assert 'hearbeat_packet_interval' in config
 		assert 'hearbeat_packet_timeout'  in config
+		assert 'ack_rx'                   in config
 
 
 		self.log = logging.getLogger("Main.Connector.Internal(%s)" % config['virtual_host'])
@@ -152,7 +153,9 @@ class ConnectorManager:
 			else:
 				in_queue = self.config['task_queue_name']
 
-			self.channel.basic_consume(queue=in_queue, callback=self._message_callback)
+			no_ack = not self.config['ack_rx']
+
+			self.channel.basic_consume(queue=in_queue, callback=self._message_callback, no_ack=no_ack)
 
 
 	def _setupQueues(self):
@@ -294,7 +297,8 @@ class ConnectorManager:
 
 	def _message_callback(self, msg):
 		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
-		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+		if self.config['ack_rx']:
+			msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
 		self.task_queue.put(msg.body)
 		self.recv_messages += 1
 
@@ -445,6 +449,7 @@ class Connector:
 
 			'hearbeat_packet_interval' : kwargs.get('hearbeat_packet_interval',  10),
 			'hearbeat_packet_timeout'  : kwargs.get('hearbeat_packet_timeout',  120),
+			'ack_rx'                   : kwargs.get('ack_rx',                   True),
 		}
 
 		self.log.info("Fetch limit: '%s'", config['session_fetch_limit'])
