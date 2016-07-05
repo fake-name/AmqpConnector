@@ -1,5 +1,6 @@
 
-import amqp
+import rabbitpy
+import urllib.parse
 import socket
 import traceback
 import logging
@@ -66,6 +67,19 @@ class ConnectorManager:
 		self._connect()
 
 
+		if self.config['master']:
+			self.in_queue = self.config['response_queue_name']
+		else:
+			self.in_queue = self.config['task_queue_name']
+
+
+		self.in_q = rabbitpy.Queue(self.connection.channel(), self.in_queue)
+
+
+		self.rx_thread = threading.Thread(target=self._processReceiving, daemon=False)
+		self.rx_thread.start()
+
+		self.active_lock = threading.Lock()
 
 
 		# config = {
@@ -108,6 +122,8 @@ class ConnectorManager:
 		# Finally, deincrement the active count
 		self.active_connections.value = 0
 
+		self.rx_thread.join()
+
 	def _connect(self):
 
 		assert self.active_connections.value == 0
@@ -115,24 +131,52 @@ class ConnectorManager:
 
 		self.log.info("Initializing AMQP connection.")
 		# Connect to server
-		self.connection = amqp.connection.Connection(host           = self.config['host'],
-													userid          = self.config['userid'],
-													password        = self.config['password'],
-													virtual_host    = self.config['virtual_host'],
-													heartbeat       = self.config['heartbeat'],
-													ssl             = self.config['sslopts'],
-													connect_timeout = self.config['socket_timeout'],
-													read_timeout    = self.config['socket_timeout'],
-													write_timeout   = self.config['socket_timeout'])
+		# self.connection = amqp.connection.Connection(host           = self.config['host'],
+		# 											userid          = self.config['userid'],
+		# 											password        = self.config['password'],
+		# 											virtual_host    = self.config['virtual_host'],
+		# 											heartbeat       = self.config['heartbeat'],
+		# 											ssl             = self.config['sslopts'],
+		# 											connect_timeout = self.config['socket_timeout'],
+		# 											read_timeout    = self.config['socket_timeout'],
+		# 											write_timeout   = self.config['socket_timeout'])
 
-		self.connection.connect()
+		# "cert_reqs" : ssl.CERT_REQUIRED,
+		# "ca_certs" : caCert,
+		# "keyfile"  : keyf,
+		# "certfile"  : cert,
+
+		qs = urllib.parse.urlencode({
+			'cacertfile'           :self.config['sslopts']['ca_certs'],
+			'certfile'             :self.config['sslopts']['certfile'],
+			'keyfile'              :self.config['sslopts']['keyfile'],
+
+			'verify'               : 'ignore',
+			'heartbeat'            : self.config['heartbeat'],
+
+			'connection_timeout'   : self.config['socket_timeout'],
+
+			})
+
+		uri = '{scheme}://{username}:{password}@{host}:{port}/{virtual_host}?{query_str}'.format(
+			scheme       = 'amqps',
+			username     = self.config['userid'],
+			password     = self.config['password'],
+			host         = self.config['host'].split(":")[0],
+			port         = self.config['host'].split(":")[1],
+			virtual_host = self.config['virtual_host'],
+			query_str    = qs,
+			)
+		self.connection = rabbitpy.Connection(uri)
+
+		# self.connection.connect()
 
 		# Channel and exchange setup
-		self.channel = self.connection.channel()
+		self.channel = rabbitpy.AMQP(self.connection.channel(blocking_read = True))
 		self.channel.basic_qos(
 				prefetch_size  = 0,
 				prefetch_count = self.config['prefetch'],
-				a_global       = False
+				global_flag    = False
 			)
 
 
@@ -146,24 +190,15 @@ class ConnectorManager:
 		self.log.info("Configuring queues.")
 		self._setupQueues()
 
-		if self.config['synchronous']:
-			self.log.info("Note: Running in synchronous mode!")
-		else:
-			self.log.info("Note: Running in asyncronous mode!")
-			if self.config['master']:
-				in_queue = self.config['response_queue_name']
-			else:
-				in_queue = self.config['task_queue_name']
 
-			no_ack = not self.config['ack_rx']
+		self.no_ack = not self.config['ack_rx']
 
-			self.channel.basic_consume(queue=in_queue, callback=self._message_callback, no_ack=no_ack)
 
 
 	def _setupQueues(self):
 
-		self.channel.exchange_declare(self.config['task_exchange'],     type=self.config['task_exchange_type'],     auto_delete=False, durable=self.config['durable'])
-		self.channel.exchange_declare(self.config['response_exchange'], type=self.config['response_exchange_type'], auto_delete=False, durable=self.config['durable'])
+		self.channel.exchange_declare(self.config['task_exchange'],     exchange_type=self.config['task_exchange_type'],     auto_delete=False, durable=self.config['durable'])
+		self.channel.exchange_declare(self.config['response_exchange'], exchange_type=self.config['response_exchange_type'], auto_delete=False, durable=self.config['durable'])
 
 		# set up consumer and response queues
 		if self.config['master']:
@@ -181,10 +216,9 @@ class ConnectorManager:
 		# "NAK" queue, used for keeping the event loop ticking when we
 		# purposefully do not want to receive messages
 		# THIS IS A SHITTY WORKAROUND for keepalive issues.
-		self.channel.exchange_declare(self.keepalive_exchange_name, type="direct", auto_delete=True, durable=False, arguments={"x-expires" : 5*60*1000})
+		self.channel.exchange_declare(self.keepalive_exchange_name, exchange_type="direct", auto_delete=True, durable=False, arguments={"x-expires" : 5*60*1000})
 		self.channel.queue_declare('nak.q', auto_delete=False, durable=False)
 		self.channel.queue_bind('nak.q',    exchange=self.keepalive_exchange_name, routing_key="nak")
-		self.channel.basic_consume(queue='nak.q', callback=self._hearbeat_callback)
 
 
 
@@ -204,7 +238,6 @@ class ConnectorManager:
 		# the interface calls should
 		connected = True
 
-		lastHeartbeat = self.connection.last_heartbeat_received
 
 		print_time = 15              # Print a status message every n seconds
 		integrator = 0               # Time since last status message emitted.
@@ -217,48 +250,22 @@ class ConnectorManager:
 			if not connected:
 				self._connect()
 				connected = True
-			# Kick over heartbeat
-			if self.connection.last_heartbeat_received != lastHeartbeat:
-				lastHeartbeat = self.connection.last_heartbeat_received
-				if integrator > print_time:
-					self.log.info("Heartbeat tick received: %s", lastHeartbeat)
 
 			# hearbeat_packet_interval
 			# hearbeat_packet_timeout
-			if self.last_hearbeat_sent + self.config['hearbeat_packet_interval'] < time.time():
-				self.log.info("Keepalive ping! (last heartbeat: %s, %s)", self.connection.last_heartbeat_received, time.time()-self.last_hearbeat_received)
-				self.last_hearbeat_sent += self.config['hearbeat_packet_interval']
-				msg = amqp.basic_message.Message(body="keepalive")
-				self.channel.basic_publish(msg, exchange=self.keepalive_exchange_name, routing_key="nak")
+			# if self.last_hearbeat_sent + self.config['hearbeat_packet_interval'] < time.time():
+			# 	self.log.info("Keepalive ping! (last heartbeat: %s, %s)", self.connection.last_heartbeat_received, time.time()-self.last_hearbeat_received)
+			# 	self.last_hearbeat_sent += self.config['hearbeat_packet_interval']
+			# 	msg = amqp.basic_message.Message(body="keepalive")
+			# 	self.channel.basic_publish(msg, exchange=self.keepalive_exchange_name, routing_key="nak")
 
-			self.connection.heartbeat_tick(rate=self.config['hearbeat_packet_interval'])
+			# self.connection.heartbeat_tick(rate=self.config['hearbeat_packet_interval'])
 
 			# If the heartbeat has been missing for greater then the timeout, throw an exception
-			if self.last_hearbeat_received + self.config['hearbeat_packet_timeout'] < time.time():
-				raise Heartbeat_Timeout_Exception("Heartbeat missed")
+			# if self.last_hearbeat_received + self.config['hearbeat_packet_timeout'] < time.time():
+			# 	raise Heartbeat_Timeout_Exception("Heartbeat missed")
 
 			time.sleep(loop_delay)
-
-			if not self.config['synchronous']:
-				# Async mode works via callbacks
-				# However, it doesn't have it's own thread, so we
-				# have to pass exec to the connection ourselves.
-				try:
-					self.connection.drain_events(timeout=1)
-				except socket.timeout:
-					# drain_events raises socket.timeout
-					# if there are no messages
-					pass
-
-			elif self.active == 0 and self.config['synchronous'] and self.runstate.value:
-
-				if integrator > print_time:
-					self.log.info("Looping, waiting for job.")
-				self.active += self._processReceiving()
-
-			else:
-				if integrator > print_time:
-					self.log.info("Active task running.")
 
 			self._publishOutgoing()
 			# Reset the print integrator.
@@ -274,14 +281,14 @@ class ConnectorManager:
 		self.channel.basic_qos(
 				prefetch_size  = 0,
 				prefetch_count = 0,
-				a_global       = False
+				global_flag    = False
 			)
 
 		# Close the connection once it's empty.
 		try:
-			self.channel.close()
+			self.in_q.stop_consuming()
 			self.connection.close()
-		except amqp.exceptions.AMQPError as e:
+		except rabbitpy.exceptions.RabbitpyException as e:
 			# We don't really care about exceptions on teardown
 			self.log.error("Error on interface teardown!")
 			self.log.error("	%s", e)
@@ -290,57 +297,42 @@ class ConnectorManager:
 
 		self.log.info("AMQP Thread exited")
 
-	def _hearbeat_callback(self, msg):
-		# self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
-		self.log.info("Heartbeat ping received! Sent messages: %s. Received messages: %s", self.sent_messages, self.recv_messages)
-		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
-		self.connection.send_heartbeat()
-		self.last_hearbeat_received = time.time()
+	# def _hearbeat_callback(self, msg):
+	# 	# self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
+	# 	self.log.info("Heartbeat ping received! Sent messages: %s. Received messages: %s", self.sent_messages, self.recv_messages)
+	# 	msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+	# 	self.connection.send_heartbeat()
+	# 	self.last_hearbeat_received = time.time()
 
-	def _message_callback(self, msg):
-		self.delivered += 1
-		if self.delivered >= 25:
-			self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
-			self.delivered = 0
-		if self.config['ack_rx']:
-			msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
-		self.task_queue.put(msg.body)
-		self.recv_messages += 1
+	# def _message_callback(self, msg):
+	# 	self.delivered += 1
+	# 	if self.delivered >= 25:
+	# 		self.log.info("Received packet via callback (%s items in queue)! Processing.", self.task_queue.qsize())
+	# 		self.delivered = 0
+	# 	if self.config['ack_rx']:
+	# 		msg.channel.basic_ack(msg.delivery_info['delivery_tag'])
+	# 	self.task_queue.put(msg.body)
+	# 	self.recv_messages += 1
 
 	def _processReceiving(self):
-
-
-		if self.config['master']:
-			in_queue = self.config['response_queue_name']
-		else:
-			in_queue = self.config['task_queue_name']
-
-		ret = 0
-
-		while True:
+		for item in self.in_q:
 			# Prevent never breaking from the loop if the feeding queue is backed up.
-			if ret > self.config['prefetch']:
-				break
-			if self.atFetchLimit():
-				break
 
-			item = self.channel.basic_get(queue=in_queue)
 			if item:
-				self.log.info("Received packet from queue '%s'! Processing.", in_queue)
-				item.channel.basic_ack(item.delivery_info['delivery_tag'])
+				self.log.info("Received packet from queue '%s'! Processing.", self.in_queue)
 				self.task_queue.put(item.body)
 				self.recv_messages += 1
-				ret += 1
+
+				with self.active_lock:
+					self.active += 1
 
 				self.session_fetched += 1
+				item.ack()
+
 				if self.atFetchLimit():
 					self.log.info("Session fetch limit reached. Not fetching any additional content.")
-			else:
-				break
+					break
 
-		if ret:
-			self.log.info("Retreived %s items!", ret)
-		return ret
 
 	def _publishOutgoing(self):
 		if self.config['master']:
@@ -354,12 +346,14 @@ class ConnectorManager:
 			try:
 				put = self.response_queue.get_nowait()
 				# self.log.info("Publishing message of len '%0.3f'K to exchange '%s'", len(put)/1024, out_queue)
-				message = amqp.basic_message.Message(body=put)
+				# message = amqp.basic_message.Message(body=put)
 				self.sent_messages += 1
+				msg_prop = {}
 				if self.config['durable']:
-					message.properties["delivery_mode"] = 2
-				self.channel.basic_publish(message, exchange=out_queue, routing_key=out_key)
-				self.active -= 1
+					msg_prop["delivery_mode"] = 2
+				self.channel.basic_publish(body=put, exchange=out_queue, routing_key=out_key, properties=msg_prop)
+				with self.active_lock:
+					self.active -= 1
 
 			except queue.Empty:
 				break
